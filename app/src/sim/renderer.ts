@@ -349,8 +349,24 @@ export class SimulationRenderer {
     const H = engine.config.worldHeight;
     const ctx = this.terrainCtx;
 
-    // 1. Deep Abyssal Substrate background (#03050a)
-    ctx.fillStyle = '#03050a';
+    // 1. Substrate: obsidian at the edges, warmed by the colony's own light
+    ctx.fillStyle = '#05060a';
+    ctx.fillRect(0, 0, W, H);
+
+    const warm = ctx.createRadialGradient(
+      engine.nest.x, engine.nest.y, Math.min(W, H) * 0.04,
+      engine.nest.x, engine.nest.y, Math.max(W, H) * 0.62
+    );
+    warm.addColorStop(0, 'rgba(64, 42, 18, 0.62)');
+    warm.addColorStop(0.42, 'rgba(28, 22, 18, 0.3)');
+    warm.addColorStop(1, 'rgba(5, 6, 10, 0)');
+    ctx.fillStyle = warm;
+    ctx.fillRect(0, 0, W, H);
+
+    const cool = ctx.createLinearGradient(0, H, 0, 0);
+    cool.addColorStop(0, 'rgba(6, 14, 26, 0.55)');
+    cool.addColorStop(0.55, 'rgba(6, 10, 18, 0)');
+    ctx.fillStyle = cool;
     ctx.fillRect(0, 0, W, H);
 
     // If custom background plate provided (e.g. from Gemini generation), render graded into substrate
@@ -379,7 +395,7 @@ export class SimulationRenderer {
     }
 
     // Faint scientific coordinate reticles and edge ticks
-    ctx.strokeStyle = 'rgba(0, 240, 255, 0.06)';
+    ctx.strokeStyle = 'rgba(140, 190, 255, 0.05)';
     ctx.lineWidth = 1.2;
     for (let x = 96; x < W; x += 192) {
       for (let y = 96; y < H; y += 192) {
@@ -738,6 +754,15 @@ export class SimulationRenderer {
 
       ctx.rotate(angles[i]);
       ctx.drawImage(spriteSheet, srcX, srcY, size, size, -half, -half, size, size);
+
+      // Warm rim light: keeps the silhouette readable on top of bright scent
+      if (state !== 2) {
+        ctx.strokeStyle = 'rgba(255, 214, 160, 0.28)';
+        ctx.lineWidth = 0.9;
+        ctx.beginPath();
+        ctx.ellipse(-5.2, 0, 4.6, 3.1, 0, Math.PI * 0.62, Math.PI * 1.38);
+        ctx.stroke();
+      }
 
       ctx.restore();
     }
