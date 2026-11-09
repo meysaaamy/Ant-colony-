@@ -13,6 +13,14 @@ export class SimulationRenderer {
 
   private pheromoneCanvas: HTMLCanvasElement;
   private pheromoneCtx: CanvasRenderingContext2D;
+  /**
+   * When the device falls behind, the per-cell colour solve (the most expensive
+   * pass in the frame) runs on alternate frames; the composited canvas from the
+   * previous frame is still correct enough to read.
+   */
+  public throttlePheromonePaint = false;
+  private paintParity = 0;
+
   private pheromoneImageData: ImageData;
 
   /** Warm/cool atmospheric halo drawn beneath the scent core. */
@@ -537,7 +545,10 @@ export class SimulationRenderer {
     ctx.drawImage(this.terrainCanvas, 0, 0);
 
     // 2. Render Pheromone Offscreen Canvas using Point-by-Point Green + Blue Proportional Blending
-    this.renderPheromoneLayer(engine);
+    this.paintParity ^= 1;
+    if (!this.throttlePheromonePaint || this.paintParity === 1) {
+      this.renderPheromoneLayer(engine);
+    }
 
     const isFog = engine.config.pheromoneRenderMode === 'fog';
 
@@ -860,8 +871,9 @@ export class SimulationRenderer {
 
       // Warm rim light: keeps the silhouette readable on top of bright scent
       if (state !== 2) {
-        ctx.strokeStyle = 'rgba(255, 214, 160, 0.28)';
-        ctx.lineWidth = 0.9;
+        // Slightly stronger rim so the silhouette survives the pulled-back camera.
+        ctx.strokeStyle = 'rgba(255, 220, 172, 0.38)';
+        ctx.lineWidth = 1.05;
         ctx.beginPath();
         ctx.ellipse(-5.2, 0, 4.6, 3.1, 0, Math.PI * 0.62, Math.PI * 1.38);
         ctx.stroke();

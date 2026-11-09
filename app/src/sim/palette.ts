@@ -12,9 +12,16 @@
  * times per frame.
  */
 
-export const FOOD_RGB = [0, 230, 118] as const; // #00e676
-export const HOME_LOW_RGB = [28, 58, 208] as const; // deep cobalt
-export const HOME_HIGH_RGB = [34, 226, 255] as const; // electric cyan
+export const FOOD_RGB = [0, 242, 122] as const; // #00f27a — hot spring green
+export const HOME_LOW_RGB = [20, 60, 236] as const; // deep cobalt
+export const HOME_HIGH_RGB = [20, 224, 255] as const; // electric cyan
+
+/**
+ * The overlap target: a pure additive cyan, as if the green and blue emitters of
+ * a panel were driven together. Deliberately louder than either source colour so
+ * the crossings read as their own light rather than a muddy average.
+ */
+const OVERLAP_RGB = [6, 246, 232] as const;
 export const ALARM_RGB = [255, 26, 74] as const;
 export const AURA_FOOD_RGB = [255, 176, 74] as const; // warm golden-amber
 export const AURA_HOME_RGB = [56, 132, 255] as const;
@@ -44,7 +51,7 @@ export function blendScent(food: number, home: number, alarm: number, fog = fals
   const wAlarm = alarm * inv;
 
   // Home runs cobalt → electric cyan with concentration.
-  const hN = clamp01(home / 55);
+  const hN = clamp01(home / 48);
   const homeR = lerp(HOME_LOW_RGB[0], HOME_HIGH_RGB[0], hN);
   const homeG = lerp(HOME_LOW_RGB[1], HOME_HIGH_RGB[1], hN);
   const homeB = lerp(HOME_LOW_RGB[2], HOME_HIGH_RGB[2], hN);
@@ -58,13 +65,13 @@ export function blendScent(food: number, home: number, alarm: number, fog = fals
   const overlap = balance * clamp01(sum / 55);
 
   if (overlap > 0.02) {
-    // aquamarine / turquoise family
-    r = lerp(r, 92, overlap * 0.55);
-    g = lerp(g, 242, overlap * 0.5);
-    b = lerp(b, 236, overlap * 0.5);
+    // Additive cyan family — the panel's green and blue driven together.
+    r = lerp(r, OVERLAP_RGB[0], overlap * 0.66);
+    g = lerp(g, OVERLAP_RGB[1], overlap * 0.58);
+    b = lerp(b, OVERLAP_RGB[2], overlap * 0.6);
 
     // …and a prismatic white-gold core where the overlap is also heavy.
-    const prism = clamp01((overlap - 0.72) * 2.4);
+    const prism = clamp01((overlap - 0.74) * 2.4);
     if (prism > 0) {
       r = lerp(r, 255, prism * 0.85);
       g = lerp(g, 248, prism * 0.7);
@@ -81,7 +88,9 @@ export function blendScent(food: number, home: number, alarm: number, fog = fals
   const nB = b / peak;
 
   const t = clamp01(sum / SATURATION);
-  const level = 0.26 + 0.74 * Math.sqrt(t);
+  // A higher floor keeps mid-strength trails legible from a pulled-back camera;
+  // the square root keeps the climb toward incandescence non-linear.
+  const level = 0.3 + 0.7 * Math.sqrt(t);
   const core = Math.max(0, t - 0.86) * 1.35;
   const mixWhite = (c: number) => (c * (1 - core) + core) * level * 255;
 
@@ -89,7 +98,7 @@ export function blendScent(food: number, home: number, alarm: number, fog = fals
     r: mixWhite(nR),
     g: mixWhite(nG),
     b: mixWhite(nB),
-    a: Math.min(255, Math.floor(sum * (fog ? 4.2 : 3.1))),
+    a: Math.min(255, Math.floor(sum * (fog ? 4.4 : 3.6))),
   };
 }
 
@@ -110,12 +119,13 @@ export function scentAura(food: number, home: number): ScentRGBA {
   const g = wFood * AURA_FOOD_RGB[1] + wHome * AURA_HOME_RGB[1];
   const b = wFood * AURA_FOOD_RGB[2] + wHome * AURA_HOME_RGB[2];
 
-  // Aura strength is traffic too, but softer and wider than the core.
+  // Aura strength is traffic too, but softer and wider than the core. Pushed a
+  // little hotter than the core so the halo survives at a distance.
   const t = clamp01(sum / 90);
   return {
     r,
     g,
     b,
-    a: Math.min(160, Math.floor(28 + 132 * Math.sqrt(t))),
+    a: Math.min(196, Math.floor(34 + 156 * Math.sqrt(t))),
   };
 }

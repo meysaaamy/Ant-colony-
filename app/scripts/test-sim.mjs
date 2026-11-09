@@ -232,6 +232,73 @@ check('most ants are foraging or returning (no permanent alarm lock)', () => {
   });
 }
 
+/* ── 2b. famine: an empty larder erases the old memory ─────────────────── */
+
+// Two identical colonies, one still fed and one whose vaults have just been
+// emptied. Both are painted with the same stale trail, then left to run.
+const faminePair = () => {
+  const fed = new SimulationEngine({ worldWidth: 700, worldHeight: 900, maxPopulation: 240 });
+  fed.loadPreset('double_bridge');
+  const starving = new SimulationEngine({ worldWidth: 700, worldHeight: 900, maxPopulation: 240 });
+  starving.loadPreset('double_bridge');
+  for (const cluster of starving.foodClusters) cluster.currentAmount = 0;
+  for (const E of [fed, starving]) {
+    for (let x = 200; x < 600; x += 6) E.depositPheromone(E.foodTrail, x, 450, 8, 70);
+  }
+  return { fed, starving };
+};
+const trailMass = (E) => {
+  let total = 0;
+  for (let i = 0; i < E.totalCells; i++) total += E.foodTrail[i];
+  return total;
+};
+const spreadOf = (E) => {
+  const n = E.activeCount;
+  let cx = 0;
+  let cy = 0;
+  for (let i = 0; i < n; i++) {
+    cx += E.x[i];
+    cy += E.y[i];
+  }
+  cx /= n;
+  cy /= n;
+  let variance = 0;
+  for (let i = 0; i < n; i++) variance += (E.x[i] - cx) ** 2 + (E.y[i] - cy) ** 2;
+  return Math.sqrt(variance / n);
+};
+
+{
+  const { fed, starving } = faminePair();
+  const fedBase = trailMass(fed);
+  const starvingBase = trailMass(starving);
+  const fedSpread = spreadOf(fed);
+  const starvingSpread = spreadOf(starving);
+
+  for (let step = 0; step < 240; step++) {
+    fed.step(1 / 60);
+    starving.step(1 / 60);
+  }
+
+  check('an empty larder puts the colony into famine', () => {
+    assert.ok(starving.famine > 0.9, `famine=${starving.famine.toFixed(2)}`);
+    assert.equal(fed.famine, 0, `fed colony should not starve (${fed.famine})`);
+  });
+
+  check('starving ants abandon the old trail instead of parading down it', () => {
+    const starvingLeft = trailMass(starving) / starvingBase;
+    const fedLeft = trailMass(fed) / fedBase;
+    assert.ok(starvingLeft < 0.25, `famine kept ${(starvingLeft * 100).toFixed(1)}% of the trail`);
+    assert.ok(starvingLeft < fedLeft * 0.35, `starving=${starvingLeft.toFixed(2)} fed=${fedLeft.toFixed(2)}`);
+  });
+
+  check('starving scouts fan out to search', () => {
+    const starvingGrowth = spreadOf(starving) / starvingSpread;
+    const fedGrowth = spreadOf(fed) / fedSpread;
+    assert.ok(starvingGrowth > 8, `spread only grew ${starvingGrowth.toFixed(1)}x`);
+    assert.ok(starvingGrowth > fedGrowth * 1.2, `starving=${starvingGrowth.toFixed(1)} fed=${fedGrowth.toFixed(1)}`);
+  });
+}
+
 /* ── 3. shortest-route convergence on the double bridge ────────────────── */
 const bridgeWorld = new SimulationEngine({ worldWidth: 700, worldHeight: 900, maxPopulation: 260 });
 bridgeWorld.loadPreset('double_bridge');

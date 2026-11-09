@@ -85,9 +85,15 @@ export default function App() {
     if (!canvas) return;
 
     /* Size the simulation world to the device aspect so the cover-fit camera
-       never crops the nest or the nutrient groves on tall phones. */
+       never crops the nest or the nutrient groves on tall phones.
+
+       The world is deliberately larger than before: the camera therefore sits
+       further back, the colony reads as one living plate of colour from a
+       distance, and the blue/green lattice stays legible as a fine RGB mesh
+       rather than a few fat smears. Ant sprites, brush and trail widths are
+       world-space, so they scale with the frame and keep their proportions. */
     const viewportAspect = window.innerWidth / Math.max(1, window.innerHeight);
-    const worldHeight = 1440;
+    const worldHeight = 1720;
     const worldWidth = Math.round(
       Math.max(560, Math.min(1080, worldHeight * viewportAspect))
     );
@@ -95,7 +101,7 @@ export default function App() {
     const engine = new SimulationEngine({
       worldWidth,
       worldHeight,
-      brushRadius: BRUSH_RADIUS_DEFAULT,
+      brushRadius: Math.round(BRUSH_RADIUS_DEFAULT * 1.19),
       maxPopulation: 600,
     });
     engine.loadPreset('double_bridge');
@@ -165,6 +171,7 @@ export default function App() {
         frameTimesRef.current.reduce((a, b) => a + b, 0) /
         (frameTimesRef.current.length || 1);
       engine.qualityThrottleDiffusion = avg > 20;
+      if (rendererRef.current) rendererRef.current.throttlePheromonePaint = avg > 20;
 
       if (!pausedRef.current) {
         accumulatorRef.current += (frameMs / 1000) * speedRef.current;

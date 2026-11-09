@@ -19,6 +19,9 @@ import {
   computeWhiskerAvoidance,
 } from './math';
 
+/** Total standing nutrients below which the colony starts to feel the pinch. */
+const FEAST_LEVEL = 140;
+
 export class SimulationEngine {
   public config: SimulationConfig;
 
@@ -94,6 +97,13 @@ export class SimulationEngine {
   // World objects
   public nest: Nest;
   public foodClusters: FoodCluster[] = [];
+  /**
+   * 0 → the colony is fed, 1 → every vault is empty. Rises smoothly as the last
+   * nutrients are harvested, and while it is high the ants stop trusting their
+   * old chemical memory: pheromone guidance is damped, the trails themselves
+   * evaporate several times faster, and scouts fan out to search.
+   */
+  public famine = 0;
   public sparks: SparkParticle[] = [];
   public motes: SporeMote[] = [];
 
@@ -515,7 +525,19 @@ export class SimulationEngine {
       this.nest.deliveryPulse = Math.max(0, this.nest.deliveryPulse - dt * 2.5);
     }
 
-    // 4. Update Agents
+    // 4. Famine state — derived from what is actually left in the vaults.
+    let foodLeft = 0;
+    for (let f = 0; f < this.foodClusters.length; f++) {
+      const amount = this.foodClusters[f].currentAmount;
+      if (amount > 0) foodLeft += amount;
+    }
+    // Fully fed above FEAST_LEVEL, starving at zero, with a readable ramp in
+    // between so the colony widens its search before the last crystal.
+    const famineTarget = 1 - Math.min(1, foodLeft / FEAST_LEVEL);
+    this.famine += (famineTarget - this.famine) * Math.min(1, dt * 1.8);
+    if (this.famine < 0.002) this.famine = 0;
+
+    // 5. Update Agents
     this.updateAgents(dt);
 
     // 5. Trail memory decays: a corridor nobody walks stops being reinforced
@@ -562,7 +584,10 @@ export class SimulationEngine {
     const W = this.gridWidth;
     const H = this.gridHeight;
     const D = Math.min(0.24, this.config.diffusionRate); // CFL clamp
-    const lambda = this.config.evaporationRate;
+    // A starving colony's trails are not worth preserving: when the vaults are
+    // empty the chemical memory is wiped several times faster so nobody keeps
+    // marching down a route that no longer leads anywhere.
+    const lambda = this.config.evaporationRate * (1 + 2.8 * this.famine);
     // Evaporation is traffic-dependent: a cell nobody walks across loses its
     // scent quickly ("trail fades when there is no movement"), while a corridor
     // with ants on it is refreshed and lingers. Precomputed per bucket so the
@@ -794,7 +819,12 @@ export class SimulationEngine {
     const sensitivity = this.config.trailSensitivity;
     const antDistance = this.config.antennaDistance;
     const antAngle = this.config.antennaAngle;
-    const wanderCoeff = this.config.wanderStrength;
+    // Pheromone trust collapses as the colony starves: old trails stop being
+    // evidence, and the search broadens instead.
+    const famine = this.famine;
+    const trailTrust = 1 - 0.92 * famine;
+    const noveltyEvery = famine > 0.25 ? 10 : 24;
+    const wanderCoeff = this.config.wanderStrength * (1 + 1.9 * famine);
 
     const nestX = this.nest.x;
     const nestY = this.nest.y;
@@ -846,9 +876,9 @@ export class SimulationEngine {
       const rawR = losR ? this.sampleField(activeField, sensors.rx, sensors.ry) : 0;
 
       // Weber-Fechner sensory response S = ln(1 + C)
-      const sLeft = weberFechner(rawL);
-      const sCenter = weberFechner(rawC);
-      const sRight = weberFechner(rawR);
+      const sLeft = weberFechner(rawL) * trailTrust;
+      const sCenter = weberFechner(rawC) * trailTrust;
+      const sRight = weberFechner(rawR) * trailTrust;
       const sumStimulus = sLeft + sCenter + sRight;
 
       let steeringDelta = 0;
@@ -861,13 +891,14 @@ export class SimulationEngine {
         this.wanderVelocity[i] =
           this.wanderVelocity[i] * 0.88 + (Math.random() - 0.5) * wanderCoeff * 0.38;
 
-        if (currentState === AntState.FORAGING && this.stepCounter % 24 === i % 24) {
+        if (currentState === AntState.FORAGING && this.stepCounter % noveltyEvery === i % noveltyEvery) {
           let bestNovelty = -1;
           let bestAng = ang;
+          const probe = 72 + 54 * famine; // starving scouts look further out
           for (let k = -1; k <= 1; k++) {
             const a = ang + k * 0.72;
-            const rx = px + Math.cos(a) * 72;
-            const ry = py + Math.sin(a) * 72;
+            const rx = px + Math.cos(a) * probe;
+            const ry = py + Math.sin(a) * probe;
             const gx2 = Math.floor(rx / cs);
             const gy2 = Math.floor(ry / cs);
             if (gx2 < 0 || gx2 >= this.gridWidth || gy2 < 0 || gy2 >= this.gridHeight) continue;
@@ -882,7 +913,7 @@ export class SimulationEngine {
           let d = bestAng - ang;
           while (d > Math.PI) d -= Math.PI * 2;
           while (d < -Math.PI) d += Math.PI * 2;
-          steeringDelta += d * 0.12;
+          steeringDelta += d * (0.12 + 0.2 * famine);
         }
       } else {
         this.wanderVelocity[i] *= 0.6;
@@ -903,7 +934,7 @@ export class SimulationEngine {
           const rx = px + Math.cos(rayAng) * reach;
           const ry = py + Math.sin(rayAng) * reach;
           if (!lineOfSight(px, py, rx, ry, isWallFn, cs)) continue;
-          const conc = weberFechner(this.sampleField(activeField, rx, ry));
+          const conc = weberFechner(this.sampleField(activeField, rx, ry)) * trailTrust;
           // Alignment penalty: a branch two sectors off must be clearly stronger.
           const score = conc / (1.0 + 0.5 * Math.abs(k));
           if (score > bestScore) {
@@ -930,6 +961,16 @@ export class SimulationEngine {
         while (angDiff > Math.PI) angDiff -= Math.PI * 2;
         while (angDiff < -Math.PI) angDiff += Math.PI * 2;
         steeringDelta += angDiff * 0.06;
+      }
+
+      // Starving colony: keep scouts radiating outward instead of orbiting the
+      // nest on a guide that now leads to an empty vault.
+      if (currentState === AntState.FORAGING && famine > 0.2) {
+        const awayAng = Math.atan2(py - nestY, px - nestX);
+        let angDiff = awayAng - ang;
+        while (angDiff > Math.PI) angDiff -= Math.PI * 2;
+        while (angDiff < -Math.PI) angDiff += Math.PI * 2;
+        steeringDelta += angDiff * (0.05 + 0.1 * famine);
       }
 
       // Proactive Whisker Obstacle Avoidance:
