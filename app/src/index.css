@@ -169,9 +169,9 @@ canvas.world {
   left: 0;
   right: 0;
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   gap: 8px;
-  padding: calc(8px + var(--sat)) calc(10px + var(--sar)) 20px calc(10px + var(--sal));
+  padding: calc(10px + var(--sat)) calc(10px + var(--sar)) 20px calc(10px + var(--sal));
   background: linear-gradient(
     180deg,
     rgba(3, 5, 10, 0.82) 0%,
@@ -190,7 +190,6 @@ canvas.world {
   height: 50px;
   padding: 0 5px 0 12px;
   border-radius: 999px;
-  overflow: hidden;
 }
 
 .telemetry .glyph {
@@ -213,6 +212,7 @@ canvas.world {
 }
 
 .telemetry .value {
+  white-space: nowrap;
   font-size: 13.5px;
   font-weight: 700;
   letter-spacing: 0.01em;
@@ -356,7 +356,7 @@ canvas.world {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  padding: 26px calc(10px + var(--sar)) calc(10px + var(--sab)) calc(10px + var(--sal));
+  padding: 26px calc(10px + var(--sar)) calc(16px + var(--sab)) calc(10px + var(--sal));
   background: linear-gradient(
     0deg,
     rgba(3, 5, 10, 0.86) 0%,
@@ -690,7 +690,7 @@ canvas.world {
   pointer-events: auto;
   overflow: hidden;
   border-radius: 24px;
-  margin: 0 calc(10px + var(--sar)) 8px calc(10px + var(--sal));
+  margin: 0 0 8px;
   height: 0;
   opacity: 0;
   transform: translateY(8px);
@@ -839,12 +839,14 @@ canvas.world {
 }
 
 .preset-card .pc-name {
+  display: block;
   font-size: 13px;
   font-weight: 650;
   line-height: 1.2;
 }
 
 .preset-card .pc-desc {
+  display: block;
   font-size: 10.5px;
   color: var(--ink-dim);
   margin-top: 2px;
