@@ -22,7 +22,7 @@ no network, no AI service calls.
 |---|---|
 | **File** | `dist/Ant-Colony-Scent-Painting.apk` |
 | **Package** | `com.app.antcolony` |
-| **Version** | 1.0.0 (versionCode 1) |
+| **Version** | 1.0.1 (versionCode 2) |
 | **Min / target SDK** | **21** / 34 — installs on Android 5.0+ |
 | **Signature** | **v1 (JAR) + v2** APK Signature Scheme, zip-aligned |
 | **Permissions** | *none* — fully offline, no INTERNET permission |
