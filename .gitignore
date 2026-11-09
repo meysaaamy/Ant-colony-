@@ -15,3 +15,6 @@ tools/vendor/
 # python
 __pycache__/
 *.pyc
+
+# apktool keeps a backup of the manifest it rewrites
+android/*.orig
