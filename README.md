@@ -130,6 +130,7 @@ app/                    React + TypeScript sandbox (Vite-free, esbuild)
   src/audio/            generative soundscape
   scripts/build.mjs     esbuild → www/ (classic IIFE + CSS, no ES modules: file:// safe)
   scripts/preview.mjs   zero-dep preview server (0.0.0.0:5173, auto-builds www/ if missing)
+  scripts/smoke-live.mjs boots the page over HTTP in jsdom (served build, not disk)
   scripts/test-ui.mjs   28-check headless interaction suite (jsdom + stubbed Canvas2D)
 
 android/                apktool project (no Gradle)
@@ -173,6 +174,7 @@ Test the shipped bundle headlessly:
 
 ```bash
 cd app && npm test        # 28/28 checks, ~2 s, self-terminating (watchdog-guarded)
+cd app && npm run test:live   # 14/14 — boots the *served* page over HTTP
 ```
 
 ---
