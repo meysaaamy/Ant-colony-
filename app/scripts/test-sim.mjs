@@ -303,17 +303,25 @@ const spreadOf = (E) => {
 const bridgeWorld = new SimulationEngine({ worldWidth: 700, worldHeight: 900, maxPopulation: 260 });
 bridgeWorld.loadPreset('double_bridge');
 
-// Accumulate who used which bridge over the first minute (before the food runs out).
+// Scent actually inside the fault line's own x-span, per bridge band: this is
+// the chemical evidence of *which* tunnel the colony is running, not the return
+// traffic from vaults that happen to sit at that height.
 const bandSum = (y0, y1, field) => {
   const W = bridgeWorld.gridWidth;
   const H = bridgeWorld.gridHeight;
+  // Mean over the *open* cells of the opening, so a wider tunnel cannot win
+  // simply by having more cells to hold scent.
   let sum = 0;
+  let open = 0;
   for (let gy = Math.floor(H * y0); gy < Math.floor(H * y1); gy++) {
-    for (let gx = Math.floor(W * 0.3); gx < Math.floor(W * 0.7); gx++) {
-      sum += field[gy * W + gx];
+    for (let gx = Math.floor(W * 0.46); gx < Math.floor(W * 0.54); gx++) {
+      const idx = gy * W + gx;
+      if (bridgeWorld.wallGrid[idx] === 1) continue;
+      sum += field[idx];
+      open++;
     }
   }
-  return sum;
+  return { mean: open ? sum / open : 0, open };
 };
 // Count real crossings of the barrier's midline, classified by branch. This is
 // area-independent: a wide or narrow tunnel can't inflate its own share.
@@ -338,6 +346,10 @@ for (let step = 0; step < 3600; step++) {
 
 const shortBridge = bandSum(0.44, 0.56, bridgeWorld.foodTrail);
 const longBridge = bandSum(0.62, 0.86, bridgeWorld.foodTrail);
+console.log(
+  `   [bridge scent] short mean=${shortBridge.mean.toFixed(2)} (${shortBridge.open} open cells)` +
+    ` | long mean=${longBridge.mean.toFixed(2)} (${longBridge.open} open cells)`
+);
 
 check('colony converges on the short bridge (traffic-weighted shortest path)', () => {
   assert.ok(
@@ -345,7 +357,10 @@ check('colony converges on the short bridge (traffic-weighted shortest path)', (
     `ants used short=${shortUse.toFixed(0)} vs long=${longUse.toFixed(0)}`
   );
   assert.ok(shortUse > 300, `too few crossings to judge: ${shortUse}`);
-  assert.ok(shortBridge >= longBridge, `scent short=${shortBridge.toFixed(0)} long=${longBridge.toFixed(0)}`);
+  assert.ok(
+    shortBridge.mean > longBridge.mean * 1.15,
+    `scent mean short=${shortBridge.mean.toFixed(2)} long=${longBridge.mean.toFixed(2)}`
+  );
 });
 
 /* ── 4. no stalling anywhere, including concave pockets ────────────────── */

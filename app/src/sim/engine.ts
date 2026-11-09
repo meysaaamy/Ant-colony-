@@ -344,27 +344,40 @@ export class SimulationEngine {
       this.nest.storedFood = 0;
       this.nest.spawnAccumulator = 0;
 
-      // Food cluster on right side
-      this.foodClusters.push({
-        id: 1,
-        x: W * 0.84,
-        y: H * 0.5,
-        radius: 48,
-        initialAmount: 900,
-        currentAmount: 900,
-        variant: 1,
-        pulsePhase: 0.5,
-      });
+      // Three nutrient vaults, stacked on the far bank. One would collapse the
+      // whole colony into a single horizontal filament; three give the foragers
+      // a vertical fan to work, which is what turns the scent into a field of
+      // blue and green instead of one stripe.
+      const vaultX = W * 0.84;
+      const vaults: Array<[number, number, number]> = [
+        [H * 0.3, 620, 1],
+        [H * 0.5, 760, 2],
+        [H * 0.7, 620, 3],
+      ];
+      for (let v = 0; v < vaults.length; v++) {
+        const [vy, amount, variant] = vaults[v];
+        this.foodClusters.push({
+          id: v + 1,
+          x: vaultX,
+          y: vy,
+          radius: 44,
+          initialAmount: amount,
+          currentAmount: amount,
+          variant,
+          pulsePhase: v * 1.7,
+        });
+      }
 
-      // Sculpt basalt barrier with the two asymmetric bridges
-      // Fill central barrier leaving only the two bridge channels
+      // A *thin* basalt fault line, full height, dead centre. It used to be half
+      // the world wide, which buried the middle of the plate under a black slab
+      // and squeezed the colony into two narrow edge strips; the scent could
+      // never read as a field. A slender wall divides without dominating.
       const midX = W * 0.5;
-      const barrierWidth = W * 0.52;
-      const startX = midX - barrierWidth * 0.5;
-      const endX = midX + barrierWidth * 0.5;
+      const slabHalf = Math.max(9, W * 0.022);
+      const startX = midX - slabHalf;
+      const endX = midX + slabHalf;
 
-      // Build obstacle block in the middle
-      // Full-height barrier: the two bridges are the only ways through.
+      // Full-height fault: the two bridges are the only ways through.
       this.paintWallBox(startX, H * 0.02, endX, H * 0.98);
 
       // Short branch: a straight bore through the barrier on the direct
@@ -373,9 +386,9 @@ export class SimulationEngine {
       this.carveTunnel(this.nest.x + 30, H * 0.5, this.foodClusters[0].x - 30, H * 0.5, 44);
 
       // Long branch: the same two endpoints reached by a deep lower loop (~2 L)
-      this.carveTunnel(this.nest.x + 30, H * 0.5, startX + 20, H * 0.8, 34);
-      this.carveTunnel(startX + 20, H * 0.8, endX - 20, H * 0.8, 34);
-      this.carveTunnel(endX - 20, H * 0.8, this.foodClusters[0].x - 30, H * 0.5, 34);
+      this.carveTunnel(this.nest.x + 30, H * 0.5, midX - 20, H * 0.8, 34);
+      this.carveTunnel(midX - 20, H * 0.8, midX + 20, H * 0.8, 34);
+      this.carveTunnel(midX + 20, H * 0.8, this.foodClusters[0].x - 30, H * 0.5, 34);
 
       // Spawn starter colony
       const initialPop = Math.min(this.config.maxPopulation, 220);

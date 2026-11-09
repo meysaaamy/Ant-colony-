@@ -541,6 +541,17 @@ export class SimulationRenderer {
     // Set high-quality canvas transform
     ctx.save();
 
+    // The camera is a *contain* fit, so on wide screens the plate floats in
+    // dark space. Clear the whole device canvas — outside the world rect the
+    // transform would otherwise leave last frame's pixels behind.
+    {
+      const worldTransform = ctx.getTransform();
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.fillStyle = '#03060c';
+      ctx.fillRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+      ctx.setTransform(worldTransform);
+    }
+
     // 1. Draw Static Terrain Cache
     ctx.drawImage(this.terrainCanvas, 0, 0);
 

@@ -167,8 +167,10 @@ Kept intact from the source archive and re-tuned for the new world aspect:
   traffic-driven luminance, quarter-res bloom, faceted crystals, nest heartbeat, 24-frame ant sprite
   sheet, spore motes, vignette, and the touch ribbon/ripple/boundary layer.
 * **World sizing & camera** — the logical world is derived from the device aspect (height 1720,
-  width clamped 560–1080) so the cover-fit camera never crops the nest or the nutrient groves on
-  tall phones. The taller world puts the camera further back: ants hold their ~18 px silhouette
+  width clamped 560–1080) and framed with a **contain** fit, so no vault, bridge or edge of the
+  plate is ever cropped — on tall phones the world fills the screen exactly, and on wide screens it
+  floats as a dark plate. The renderer clears the full device canvas each frame, so nothing leaks
+  into the void around it. The taller world puts the camera further back: ants hold their ~18 px silhouette
   thanks to world-space sprites and rim light, while the scent lattice resolves into a finer RGB
   mesh instead of a few fat smears. Brush radius scales with the frame so painting feels identical.
 * **Frame budget** — the per-cell colour solve is the hot pass; under load the FPS guard switches

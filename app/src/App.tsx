@@ -130,7 +130,9 @@ export default function App() {
       const ctx = canvas.getContext('2d');
       if (!ctx) return;
       ctx.setTransform(1, 0, 0, 1, 0, 0);
-      const scale = Math.max(
+      // Contain fit: the whole plate — every vault, the fault line and the
+      // nest — stays in frame on any aspect, with dark space around it.
+      const scale = Math.min(
         (w * dpr) / engine.config.worldWidth,
         (h * dpr) / engine.config.worldHeight
       );
@@ -229,7 +231,7 @@ export default function App() {
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
     const px = (clientX - rect.left) * dpr;
     const py = (clientY - rect.top) * dpr;
-    const scale = Math.max(
+    const scale = Math.min(
       (rect.width * dpr) / engine.config.worldWidth,
       (rect.height * dpr) / engine.config.worldHeight
     );
