@@ -11,8 +11,8 @@
   --ink-faint: rgba(233, 240, 250, 0.36);
 
   /* Obsidian glass */
-  --glass: rgba(8, 12, 20, 0.78);
-  --glass-deep: rgba(6, 9, 16, 0.9);
+  --glass: rgba(11, 15, 23, 0.84);
+  --glass-deep: rgba(8, 11, 18, 0.92);
   --glass-soft: rgba(255, 255, 255, 0.045);
 
   /* Specular system */
@@ -136,7 +136,7 @@ canvas.world {
 }
 
 .chrome.is-dimmed {
-  opacity: 0.22;
+  opacity: 0.25;
   transform: scale(0.988);
   transition-duration: 60ms;
 }

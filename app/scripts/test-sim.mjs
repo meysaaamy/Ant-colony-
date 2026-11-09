@@ -26,7 +26,7 @@ const entry = join(dir, 'entry.ts');
 await writeFile(
   entry,
   `export { SimulationEngine } from ${JSON.stringify(new URL('../src/sim/engine.ts', import.meta.url).pathname)};
-   export { blendScent, FOOD_RGB, HOME_RGB } from ${JSON.stringify(new URL('../src/sim/palette.ts', import.meta.url).pathname)};
+   export { blendScent, scentAura, FOOD_RGB } from ${JSON.stringify(new URL('../src/sim/palette.ts', import.meta.url).pathname)};
    export { AntState } from ${JSON.stringify(new URL('../src/sim/types.ts', import.meta.url).pathname)};`
 );
 const outfile = join(dir, 'bundle.mjs');
@@ -38,7 +38,7 @@ await build({
   outfile,
   logLevel: 'silent',
 });
-const { SimulationEngine, blendScent, AntState } = await import(outfile);
+const { SimulationEngine, blendScent, scentAura, AntState } = await import(outfile);
 
 const checks = [];
 const check = (name, fn) => {
@@ -75,6 +75,27 @@ check('brightness scales with traffic', () => {
   const lum = (c) => c.r + c.g + c.b;
   assert.ok(lum(busy) > lum(quiet) * 1.6, `${lum(busy)} vs ${lum(quiet)}`);
   assert.ok(busy.a >= quiet.a);
+});
+check('home scent runs cobalt → electric cyan with concentration', () => {
+  const faint = blendScent(0, 12, 0);
+  const strong = blendScent(0, 90, 0);
+  const cyanicity = (c) => c.g / Math.max(1, c.b);
+  assert.ok(cyanicity(strong) > cyanicity(faint) * 1.25, `${cyanicity(strong)} vs ${cyanicity(faint)}`);
+  assert.ok(strong.b > 150 && strong.g > 150, JSON.stringify(strong));
+});
+check('food carries a warm golden aura, home a cool one', () => {
+  const foodAura = scentAura(60, 0);
+  const homeAura = scentAura(0, 60);
+  assert.ok(foodAura.r > foodAura.g && foodAura.g > foodAura.b, JSON.stringify(foodAura));
+  assert.ok(homeAura.b > homeAura.r, JSON.stringify(homeAura));
+  assert.ok(foodAura.a > 100 && homeAura.a > 100);
+  assert.equal(scentAura(0, 0).a, 0);
+});
+check('peak overlap turns prismatic (near-white gold)', () => {
+  const peak = blendScent(60, 60, 0);
+  const lum = (c) => (c.r + c.g + c.b) / 3;
+  assert.ok(lum(peak) > 200, `peak average ${lum(peak)}`);
+  assert.ok(peak.r > 150 && peak.g > 200, JSON.stringify(peak));
 });
 check('empty terrain is fully transparent', () => {
   const empty = blendScent(0, 0, 0);
@@ -167,6 +188,46 @@ check('most ants are foraging or returning (no permanent alarm lock)', () => {
     if (s === AntState.FORAGING || s === AntState.RETURNING) valid++;
   }
   assert.ok(valid / engine.activeCount > 0.9, `${valid}/${engine.activeCount} in a working state`);
+});
+
+/* ── 3. shortest-route convergence on the double bridge ────────────────── */
+const bridgeWorld = new SimulationEngine({ worldWidth: 700, worldHeight: 900, maxPopulation: 260 });
+bridgeWorld.loadPreset('double_bridge');
+for (let step = 0; step < 10_800; step++) bridgeWorld.step(1 / 60); // 3 simulated minutes
+
+const bandScent = (yFromFrac, yToFrac) => {
+  const W = bridgeWorld.gridWidth;
+  const H = bridgeWorld.gridHeight;
+  let sum = 0;
+  for (let gy = Math.floor(H * yFromFrac); gy < Math.floor(H * yToFrac); gy++) {
+    for (let gx = Math.floor(W * 0.3); gx < Math.floor(W * 0.7); gx++) {
+      sum += bridgeWorld.foodTrail[gy * W + gx];
+    }
+  }
+  return sum;
+};
+const shortBridge = bandScent(0.28, 0.42);
+const longBridge = bandScent(0.6, 0.82);
+
+check('colony converges on the short bridge (traffic-weighted shortest path)', () => {
+  assert.ok(shortBridge > longBridge, `short=${shortBridge.toFixed(0)} long=${longBridge.toFixed(0)}`);
+});
+
+/* ── 4. no stalling anywhere, including concave pockets ────────────────── */
+const before = Array.from({ length: engine.activeCount }, (_, i) => [engine.x[i], engine.y[i]]);
+for (let step = 0; step < 180; step++) engine.step(1 / 60); // 3 seconds
+let stalled = 0;
+for (let i = 0; i < engine.activeCount; i++) {
+  const d = Math.hypot(engine.x[i] - before[i][0], engine.y[i] - before[i][1]);
+  if (d < 1.5) stalled++;
+}
+check('no ant is stalled in a choke point or pocket', () => {
+  assert.ok(stalled / engine.activeCount < 0.02, `${stalled}/${engine.activeCount} stalled`);
+});
+check('carriers exist (returning ants hold their shard on the way home)', () => {
+  let carriers = 0;
+  for (let i = 0; i < engine.activeCount; i++) if (engine.state[i] === 1) carriers++;
+  assert.ok(carriers > 0, 'no ant is carrying food');
 });
 
 console.log(checks.join('\n'));

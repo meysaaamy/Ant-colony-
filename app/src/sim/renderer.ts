@@ -1,4 +1,4 @@
-import { blendScent } from './palette';
+import { blendScent, scentAura } from './palette';
 import { SimulationEngine } from './engine';
 import { AntState, ToolType, StrokePoint } from './types';
 import { computePheromoneAlpha } from './math';
@@ -14,6 +14,11 @@ export class SimulationRenderer {
   private pheromoneCanvas: HTMLCanvasElement;
   private pheromoneCtx: CanvasRenderingContext2D;
   private pheromoneImageData: ImageData;
+
+  /** Warm/cool atmospheric halo drawn beneath the scent core. */
+  private auraCanvas: HTMLCanvasElement;
+  private auraCtx: CanvasRenderingContext2D;
+  private auraImageData: ImageData;
 
   private bloomCanvas: HTMLCanvasElement;
   private bloomCtx: CanvasRenderingContext2D;
@@ -60,6 +65,12 @@ export class SimulationRenderer {
     this.pheromoneCanvas.height = engine.gridHeight;
     this.pheromoneCtx = this.pheromoneCanvas.getContext('2d', { willReadFrequently: true })!;
     this.pheromoneImageData = this.pheromoneCtx.createImageData(engine.gridWidth, engine.gridHeight);
+
+    this.auraCanvas = document.createElement('canvas');
+    this.auraCanvas.width = engine.gridWidth;
+    this.auraCanvas.height = engine.gridHeight;
+    this.auraCtx = this.auraCanvas.getContext('2d', { willReadFrequently: true })!;
+    this.auraImageData = this.auraCtx.createImageData(engine.gridWidth, engine.gridHeight);
 
     // 3. Bloom Canvas (1/4 resolution for lightweight bilinear glow)
     this.bloomCanvas = document.createElement('canvas');
@@ -178,12 +189,13 @@ export class SimulationRenderer {
         ctx.translate(ox, oy);
 
         // Body colors
-        const cuticleDark = '#0e141e';
-        const cuticleHighlight = state === 2 ? '#ff2a5a' : '#2d3f58';
-        const rimColor = state === 2 ? 'rgba(255, 10, 67, 0.7)' : 'rgba(255, 255, 255, 0.35)';
+        // Golden-tan cuticle, crimson when alarmed.
+        const cuticleDark = state === 2 ? '#3d1119' : '#5a3a1e';
+        const cuticleHighlight = state === 2 ? '#ff2a5a' : '#9a6b33';
+        const rimColor = state === 2 ? 'rgba(255, 10, 67, 0.7)' : 'rgba(255, 214, 150, 0.5)';
 
         // 1. Articulated Legs (3 pairs)
-        ctx.strokeStyle = state === 2 ? '#942238' : '#334155';
+        ctx.strokeStyle = state === 2 ? '#942238' : '#8a6234';
         ctx.lineWidth = 1.3;
         ctx.lineCap = 'round';
 
@@ -229,7 +241,7 @@ export class SimulationRenderer {
         ctx.stroke();
 
         // 3. Thorax (Mesosoma)
-        ctx.fillStyle = '#151f2e';
+        ctx.fillStyle = state === 2 ? '#2c0d12' : '#6b4526';
         ctx.beginPath();
         ctx.ellipse(-0.5, 0, 3.6, 2.2, 0, 0, Math.PI * 2);
         ctx.fill();
@@ -350,7 +362,7 @@ export class SimulationRenderer {
     const ctx = this.terrainCtx;
 
     // 1. Substrate: obsidian at the edges, warmed by the colony's own light
-    ctx.fillStyle = '#05060a';
+    ctx.fillStyle = '#03060c';
     ctx.fillRect(0, 0, W, H);
 
     const warm = ctx.createRadialGradient(
@@ -408,7 +420,7 @@ export class SimulationRenderer {
       }
     }
 
-    // 2. Basalt-Obsidian Rock Walls (#101622) with rim lighting (#26354d)
+    // 2. Slate-obsidian walls (#121926) with a beaded, beveled outer rim
     const cs = engine.config.cellSize;
     const gW = engine.gridWidth;
     const gH = engine.gridHeight;
@@ -425,7 +437,7 @@ export class SimulationRenderer {
     }
 
     // Core Basalt Wall
-    ctx.fillStyle = '#101622';
+    ctx.fillStyle = '#121926';
     for (let gy = 0; gy < gH; gy++) {
       for (let gx = 0; gx < gW; gx++) {
         if (walls[gy * gW + gx] === 1) {
@@ -434,9 +446,9 @@ export class SimulationRenderer {
       }
     }
 
-    // Crisp Rim Lighting (#26354d) on wall contours
-    ctx.strokeStyle = '#26354d';
-    ctx.lineWidth = 1.5;
+    // Beveled rim: a soft inner highlight plus a beaded outer edge
+    ctx.strokeStyle = 'rgba(120, 150, 190, 0.22)';
+    ctx.lineWidth = 2.4;
     for (let gy = 0; gy < gH; gy++) {
       for (let gx = 0; gx < gW; gx++) {
         const idx = gy * gW + gx;
@@ -471,6 +483,21 @@ export class SimulationRenderer {
             ctx.lineTo((gx + 1) * cs, (gy + 1) * cs);
             ctx.stroke();
           }
+        }
+      }
+    }
+
+    // Beaded contour: small pearls along exposed wall faces (organic silhouette)
+    ctx.fillStyle = 'rgba(158, 186, 224, 0.30)';
+    for (let gy = 0; gy < gH; gy++) {
+      for (let gx = 0; gx < gW; gx++) {
+        if (walls[gy * gW + gx] !== 1) continue;
+        const openBelow = gy < gH - 1 && walls[(gy + 1) * gW + gx] === 0;
+        if (!openBelow) continue;
+        for (let bx = gx * cs + cs * 0.25; bx < (gx + 1) * cs; bx += cs * 0.5) {
+          ctx.beginPath();
+          ctx.arc(bx, (gy + 1) * cs - 1.2, 0.9, 0, Math.PI * 2);
+          ctx.fill();
         }
       }
     }
@@ -515,9 +542,13 @@ export class SimulationRenderer {
 
     if (isFog) {
       // Fog mode: source-over blending gives dense opaque vapor coverage at high concentrations
-      ctx.globalCompositeOperation = 'source-over';
       ctx.imageSmoothingEnabled = true;
       ctx.imageSmoothingQuality = 'high';
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.globalAlpha = 0.4;
+      ctx.drawImage(this.auraCanvas, 0, 0, W, H);
+      ctx.globalAlpha = 1;
+      ctx.globalCompositeOperation = 'source-over';
       ctx.drawImage(this.pheromoneCanvas, 0, 0, W, H);
 
       // Subtle atmospheric boundary halo
@@ -528,10 +559,16 @@ export class SimulationRenderer {
       ctx.globalAlpha = 1.0;
       ctx.globalCompositeOperation = 'source-over';
     } else {
-      // Glow mode: screen blending + lighter bloom for bioluminescent luminescence
-      ctx.globalCompositeOperation = 'screen';
+      // Glow mode: warm/cool halo first, then the hard scent core on top.
       ctx.imageSmoothingEnabled = true;
       ctx.imageSmoothingQuality = 'high';
+
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.globalAlpha = 0.55;
+      ctx.drawImage(this.auraCanvas, 0, 0, W, H);
+      ctx.globalAlpha = 1;
+
+      ctx.globalCompositeOperation = 'screen';
       ctx.drawImage(this.pheromoneCanvas, 0, 0, W, H);
 
       // Composite secondary 1/4 bloom layer with 'lighter' blending for deep glow
@@ -579,6 +616,7 @@ export class SimulationRenderer {
    */
   private renderPheromoneLayer(engine: SimulationEngine) {
     const data = this.pheromoneImageData.data;
+    const aura = this.auraImageData.data;
     const count = engine.totalCells;
 
     const ft = engine.foodTrail;
@@ -599,8 +637,18 @@ export class SimulationRenderer {
         data[idx4 + 1] = 0;
         data[idx4 + 2] = 0;
         data[idx4 + 3] = 0;
+        aura[idx4] = 0;
+        aura[idx4 + 1] = 0;
+        aura[idx4 + 2] = 0;
+        aura[idx4 + 3] = 0;
         continue;
       }
+
+      const au = scentAura(v_ft, v_hg);
+      aura[idx4] = au.r;
+      aura[idx4 + 1] = au.g;
+      aura[idx4 + 2] = au.b;
+      aura[idx4 + 3] = au.a;
 
       // Point-by-point chromatic blend (shared with the unit tests).
       const c = blendScent(v_ft, v_hg, v_al, isFog);
@@ -616,6 +664,7 @@ export class SimulationRenderer {
     }
 
     this.pheromoneCtx.putImageData(this.pheromoneImageData, 0, 0);
+    this.auraCtx.putImageData(this.auraImageData, 0, 0);
   }
 
   private renderFoodClusters(engine: SimulationEngine) {
@@ -669,22 +718,49 @@ export class SimulationRenderer {
     ctx.arc(0, 0, nr * 1.5, 0, Math.PI * 2);
     ctx.fill();
 
-    // Concentric amber and cyan rings with slow heartbeat pulse
+    // Dual concentric amber-gold rings with slow heartbeat + delivery pulse
     const heartbeat = 1.0 + nest.pulseAnim * 0.08 + nest.deliveryPulse * 0.25;
 
-    // Cyan outer orientation ring
-    ctx.strokeStyle = `rgba(0, 240, 255, ${0.45 + nest.deliveryPulse * 0.5})`;
-    ctx.lineWidth = 1.6;
+    // Outer ring: thin, wide, faintly orbiting
+    ctx.strokeStyle = `rgba(255, 196, 110, ${0.35 + nest.deliveryPulse * 0.45})`;
+    ctx.lineWidth = 1.2;
     ctx.beginPath();
-    ctx.arc(0, 0, nr * 0.95 * heartbeat, 0, Math.PI * 2);
+    ctx.arc(0, 0, nr * 1.06 * heartbeat, 0, Math.PI * 2);
     ctx.stroke();
 
-    // Amber inner trail ring
-    ctx.strokeStyle = `rgba(255, 174, 0, ${0.65 + nest.deliveryPulse * 0.35})`;
-    ctx.lineWidth = 2.0;
+    // Inner ring: solid amber-gold, brighter on delivery
+    ctx.strokeStyle = `rgba(255, 176, 74, ${0.72 + nest.deliveryPulse * 0.28})`;
+    ctx.lineWidth = 2.2;
     ctx.beginPath();
-    ctx.arc(0, 0, nr * 0.7 * heartbeat, 0, Math.PI * 2);
+    ctx.arc(0, 0, nr * 0.78 * heartbeat, 0, Math.PI * 2);
     ctx.stroke();
+
+    // Orbital tick marks — 24 small spokes, slowly rotating
+    ctx.save();
+    ctx.rotate(nest.ringPhase * 0.35);
+    ctx.strokeStyle = `rgba(255, 214, 160, ${0.28 + nest.deliveryPulse * 0.4})`;
+    ctx.lineWidth = 1;
+    for (let t = 0; t < 24; t++) {
+      const a = (t / 24) * Math.PI * 2;
+      const r0 = nr * 1.1 * heartbeat;
+      const r1 = r0 + (t % 3 === 0 ? 5.5 : 2.6);
+      ctx.beginPath();
+      ctx.moveTo(Math.cos(a) * r0, Math.sin(a) * r0);
+      ctx.lineTo(Math.cos(a) * r1, Math.sin(a) * r1);
+      ctx.stroke();
+    }
+    ctx.restore();
+
+    // Warm bloom at the crater lip on delivery
+    if (nest.deliveryPulse > 0.01) {
+      const glow = ctx.createRadialGradient(0, 0, nr * 0.3, 0, 0, nr * 2.1);
+      glow.addColorStop(0, `rgba(255, 196, 110, ${0.3 * nest.deliveryPulse})`);
+      glow.addColorStop(1, 'rgba(255, 196, 110, 0)');
+      ctx.fillStyle = glow;
+      ctx.beginPath();
+      ctx.arc(0, 0, nr * 2.1, 0, Math.PI * 2);
+      ctx.fill();
+    }
 
     // Center Abyssal Pit
     ctx.fillStyle = '#020306';
@@ -754,6 +830,32 @@ export class SimulationRenderer {
 
       ctx.rotate(angles[i]);
       ctx.drawImage(spriteSheet, srcX, srcY, size, size, -half, -half, size, size);
+
+      // Carried shard: a faceted emerald clamped in the mandibles
+      if (state === 1) {
+        ctx.save();
+        ctx.translate(9.5, 0);
+        ctx.fillStyle = 'rgba(0, 230, 118, 0.28)';
+        ctx.beginPath();
+        ctx.arc(0, 0, 5.4, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.beginPath();
+        ctx.moveTo(2.6, 0);
+        ctx.lineTo(0, -2.4);
+        ctx.lineTo(-2.4, 0);
+        ctx.lineTo(0, 2.4);
+        ctx.closePath();
+        const shard = ctx.createLinearGradient(-2, -2, 2, 2);
+        shard.addColorStop(0, '#d9ffe9');
+        shard.addColorStop(0.55, '#00e676');
+        shard.addColorStop(1, '#007a44');
+        ctx.fillStyle = shard;
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(220, 255, 235, 0.75)';
+        ctx.lineWidth = 0.5;
+        ctx.stroke();
+        ctx.restore();
+      }
 
       // Warm rim light: keeps the silhouette readable on top of bright scent
       if (state !== 2) {

@@ -65,6 +65,14 @@ export class SimulationEngine {
   public stuckTimer: Float32Array;
   public lastSampleX: Float32Array;
   public lastSampleY: Float32Array;
+  /** 0 = free, +1 = contouring with wall on the left, -1 = on the right. */
+  public wallMode: Int8Array;
+  public wallCooldown: Float32Array;
+  /** Distance travelled on the current leg (nest→food or food→nest). */
+  public pathLen: Float32Array;
+  /** Previous position, used to stamp a continuous trail between ticks. */
+  public prevX: Float32Array;
+  public prevY: Float32Array;
 
   // Spatial Hash Grid for O(1) neighbor lookups and zero allocation
   public hashCellSize: number;
@@ -152,6 +160,11 @@ export class SimulationEngine {
     this.stuckTimer = new Float32Array(this.MAX_AGENTS);
     this.lastSampleX = new Float32Array(this.MAX_AGENTS);
     this.lastSampleY = new Float32Array(this.MAX_AGENTS);
+    this.wallMode = new Int8Array(this.MAX_AGENTS);
+    this.wallCooldown = new Float32Array(this.MAX_AGENTS);
+    this.pathLen = new Float32Array(this.MAX_AGENTS);
+    this.prevX = new Float32Array(this.MAX_AGENTS);
+    this.prevY = new Float32Array(this.MAX_AGENTS);
 
     // Spatial hash grid (cell size 24 logical units)
     this.hashCellSize = 24;
@@ -611,6 +624,35 @@ export class SimulationEngine {
     this.alarmNext = al;
   }
 
+  /** Stamp one sample of a trail, including a narrow cross-trail footprint. */
+  private depositScent(field: Float32Array, x: number, y: number, baseStr: number, wide: boolean) {
+    const cs = this.config.cellSize;
+    const gx = Math.floor(x / cs);
+    const gy = Math.floor(y / cs);
+    if (gx < 0 || gx >= this.gridWidth || gy < 0 || gy >= this.gridHeight) return;
+
+    const cIdx = gy * this.gridWidth + gx;
+    if (this.wallGrid[cIdx] === 1) return;
+
+    const timeSince = this.simTime - this.lastVisitGrid[cIdx];
+    const amount = saturatingDeposition(baseStr, timeSince, 0.06, field[cIdx]);
+    field[cIdx] = Math.min(100.0, field[cIdx] + amount);
+    this.lastVisitGrid[cIdx] = this.simTime;
+
+    if (!wide) return;
+
+    // A tight cross-trail gives returning highways body without smearing.
+    const spill = baseStr * 0.42;
+    for (let k = 0; k < 4; k++) {
+      const ngx = gx + (k === 0 ? 1 : k === 1 ? -1 : 0);
+      const ngy = gy + (k === 2 ? 1 : k === 3 ? -1 : 0);
+      if (ngx < 0 || ngx >= this.gridWidth || ngy < 0 || ngy >= this.gridHeight) continue;
+      const nIdx = ngy * this.gridWidth + ngx;
+      if (this.wallGrid[nIdx] === 1) continue;
+      field[nIdx] = Math.min(100.0, field[nIdx] + spill * 0.28);
+    }
+  }
+
   /** Radial scent stamp — marks discoveries (food found) with a soft beacon. */
   private stampScent(field: Float32Array, x: number, y: number, cells: number, amount: number) {
     const cs = this.config.cellSize;
@@ -759,11 +801,39 @@ export class SimulationEngine {
       const sRight = weberFechner(rawR);
       const sumStimulus = sLeft + sCenter + sRight;
 
+      let steeringDelta = 0;
+
       // Natural Organic Exploration Wander:
-      // When exploring with no trail, maintain smooth momentum-correlated wander (natural sweeping arcs)
+      // With no trail to follow, scouting ants sweep on smooth correlated arcs
+      // and bias away from ground the colony has already combed through, which
+      // is what pushes discovery out toward the far clusters.
       if (sumStimulus < 0.02) {
         this.wanderVelocity[i] =
           this.wanderVelocity[i] * 0.88 + (Math.random() - 0.5) * wanderCoeff * 0.38;
+
+        if (currentState === AntState.FORAGING && this.stepCounter % 24 === i % 24) {
+          let bestNovelty = -1;
+          let bestAng = ang;
+          for (let k = -1; k <= 1; k++) {
+            const a = ang + k * 0.72;
+            const rx = px + Math.cos(a) * 72;
+            const ry = py + Math.sin(a) * 72;
+            const gx2 = Math.floor(rx / cs);
+            const gy2 = Math.floor(ry / cs);
+            if (gx2 < 0 || gx2 >= this.gridWidth || gy2 < 0 || gy2 >= this.gridHeight) continue;
+            const nIdx = gy2 * this.gridWidth + gx2;
+            if (this.wallGrid[nIdx] === 1) continue;
+            const novelty = 1 / (1 + (this.simTime - this.lastVisitGrid[nIdx]) * 0.55);
+            if (novelty > bestNovelty) {
+              bestNovelty = novelty;
+              bestAng = a;
+            }
+          }
+          let d = bestAng - ang;
+          while (d > Math.PI) d -= Math.PI * 2;
+          while (d < -Math.PI) d += Math.PI * 2;
+          steeringDelta += d * 0.12;
+        }
       } else {
         this.wanderVelocity[i] *= 0.6;
       }
@@ -773,7 +843,6 @@ export class SimulationEngine {
       // Ants commit to the corridor that carries the most pheromone *and* lies
       // closest to their heading, which is how a colony settles on the shortest
       // well-travelled route instead of oscillating between equal branches.
-      let steeringDelta = 0;
       let fanWeight = 0;
       if (sumStimulus > 0.015) {
         let bestScore = 0;
@@ -815,6 +884,38 @@ export class SimulationEngine {
 
       // Proactive Whisker Obstacle Avoidance:
       // Steers ants around walls and corners before impact
+      // ── Direct lock-on ──────────────────────────────────────────────
+      // With a clear line of sight to the goal, an ant stops dithering and
+      // homes in: foragers onto the nearest visible cluster, carriers onto
+      // the nest. Wall-following overrides this (see below).
+      if (currentState === AntState.RETURNING) {
+        const losNest = lineOfSight(px, py, nestX, nestY, isWallFn, cs);
+        if (losNest) {
+          const a = Math.atan2(nestY - py, nestX - px);
+          let d = a - ang;
+          while (d > Math.PI) d -= Math.PI * 2;
+          while (d < -Math.PI) d += Math.PI * 2;
+          steeringDelta += d * 0.22;
+        }
+      } else {
+        let best: { d: number; a: number } | null = null;
+        for (let f = 0; f < this.foodClusters.length; f++) {
+          const c = this.foodClusters[f];
+          if (c.currentAmount <= 0) continue;
+          const d = Math.hypot(c.x - px, c.y - py);
+          if (d > 300) continue;
+          if (best && d >= best.d) continue;
+          if (!lineOfSight(px, py, c.x, c.y, isWallFn, cs)) continue;
+          best = { d, a: Math.atan2(c.y - py, c.x - px) };
+        }
+        if (best) {
+          let d = best.a - ang;
+          while (d > Math.PI) d -= Math.PI * 2;
+          while (d < -Math.PI) d += Math.PI * 2;
+          steeringDelta += d * 0.16;
+        }
+      }
+
       // Layered whiskers: near/mid/far so ants start turning early and never
       // press into a corner ("پشت دیوارها گیر نکنند").
       for (const [reach, spread, gain] of [
@@ -849,6 +950,7 @@ export class SimulationEngine {
         if (nestDist < nestR) {
           // Deliver nutrient
           this.state[i] = AntState.FORAGING;
+          this.pathLen[i] = 0;
           this.homeDx[i] = 0;
           this.homeDy[i] = 0;
           ang += Math.PI; // Turn back towards foraging grounds
@@ -885,6 +987,7 @@ export class SimulationEngine {
             // Harvest food crystal unit!
             cluster.currentAmount--;
             this.state[i] = AntState.RETURNING;
+            this.pathLen[i] = 0; // fresh leg: potency starts at maximum
             ang += Math.PI; // Turn back towards nest
 
             // Stamp a bright food-scent beacon at the source so the return
@@ -942,29 +1045,54 @@ export class SimulationEngine {
         ang = -ang;
       }
 
-      // Circular wall collision with smooth tangent sliding & guaranteed exit velocity
+      // ── Wall contouring ─────────────────────────────────────────────
+      // When a wall interrupts the heading, the ant does not press into it:
+      // it picks a side, aligns with the contour and glides along it until the
+      // way ahead is clear, then resumes its errand. A stalled contour flips
+      // sides, which is the clean corner escape.
       const col = resolveWallCollision(px, py, antRadius, isWallFn, cs);
       if (col.collided) {
         px = col.x;
         py = col.y;
+        if (this.wallMode[i] === 0 && this.wallCooldown[i] <= 0) {
+          // Choose the side that continues closest to the current errand.
+          const tanL = Math.atan2(col.normalX, -col.normalY);
+          const tanR = Math.atan2(-col.normalX, col.normalY);
+          let dL = tanL - ang;
+          let dR = tanR - ang;
+          while (dL > Math.PI) dL -= Math.PI * 2;
+          while (dL < -Math.PI) dL += Math.PI * 2;
+          while (dR > Math.PI) dR -= Math.PI * 2;
+          while (dR < -Math.PI) dR += Math.PI * 2;
+          this.wallMode[i] = Math.abs(dL) <= Math.abs(dR) ? 1 : -1;
+        }
+      }
 
-        const dot = nvx * col.normalX + nvy * col.normalY;
-        if (dot < 0) {
-          const slideVx = nvx - dot * col.normalX;
-          const slideVy = nvy - dot * col.normalY;
-          const slideSpeed = Math.hypot(slideVx, slideVy);
-
-          if (slideSpeed > 0.35) {
-            ang = Math.atan2(slideVy, slideVx);
-          } else {
-            // Head-on collision: slide along wall tangent away from wall normal
-            const tanX = -col.normalY;
-            const tanY = col.normalX;
-            const sign = Math.sin(this.simTime * 4.0 + i) > 0 ? 1 : -1;
-            ang = Math.atan2(tanY * sign, tanX * sign);
+      if (this.wallMode[i] !== 0) {
+        // Probe the contour tangent and hug it, keeping a small inward bias so
+        // the ant follows the silhouette instead of drifting away.
+        const probeDist = antRadius + 12;
+        const leftAng = ang - this.wallMode[i] * 0.42;
+        const freeLeft = !isWallFn(
+          Math.floor((px + Math.cos(leftAng) * probeDist) / cs),
+          Math.floor((py + Math.sin(leftAng) * probeDist) / cs)
+        );
+        if (freeLeft) {
+          // Way ahead is open again — resume the errand smoothly.
+          this.wallMode[i] = 0;
+          this.wallCooldown[i] = 0.25;
+        } else {
+          ang += this.wallMode[i] * 0.16;
+          // Keep the ant in contact with the wall while contouring.
+          const hug = resolveWallCollision(px, py, antRadius + 2.5, isWallFn, cs);
+          if (hug.collided) {
+            px = hug.x;
+            py = hug.y;
           }
         }
       }
+
+      if (this.wallCooldown[i] > 0) this.wallCooldown[i] -= dt;
 
       // Active Stuck Detector & Recovery:
       // Guarantees ants never remain trapped in corners or dead-ends
@@ -997,7 +1125,15 @@ export class SimulationEngine {
                 bestAng = a;
               }
             }
-            ang = bestAng;
+            // If we were contouring, reverse the contour first: that alone
+            // clears most concave pockets without any teleport.
+            if (this.wallMode[i] !== 0) {
+              this.wallMode[i] = this.wallMode[i] === 1 ? -1 : 1;
+              this.wallCooldown[i] = 0.45;
+              ang += Math.PI * 0.5 * this.wallMode[i];
+            } else {
+              ang = bestAng;
+            }
             px += Math.cos(ang) * 4.5;
             py += Math.sin(ang) * 4.5;
             this.stuckTimer[i] = 0;
@@ -1011,66 +1147,53 @@ export class SimulationEngine {
         this.lastSampleY[i] = py;
       }
 
-      // Bold, Vivid Pheromone Deposition:
-      // Returning ants deposit thick, radiant foodTrail highways with 3x3 footprint
+      // ── Continuous, route-weighted deposition ───────────────────────
+      // Trails are stamped along the segment travelled since the last tick, so
+      // they read as an unbroken filament rather than a dotted line. Potency
+      // falls with the distance already walked on this leg, which is what makes
+      // the colony prefer — and visibly brighten — the shortest route.
       this.pheromoneTimer[i] -= dt;
+      const isReturning = this.state[i] === AntState.RETURNING;
+
       if (this.pheromoneTimer[i] <= 0) {
-        const isReturning = this.state[i] === AntState.RETURNING;
-        this.pheromoneTimer[i] = isReturning ? 0.045 : 0.10;
+        this.pheromoneTimer[i] = isReturning ? 0.032 : 0.075;
 
         const depField = isReturning ? this.foodTrail : this.homeGuide;
-        const gx = Math.floor(px / cs);
-        const gy = Math.floor(py / cs);
+        const efficiency = 1 / (1 + this.pathLen[i] / 900); // 1 → strong, decays with distance
+        const baseStr = (isReturning ? 62.0 : 20.0) * (0.55 + 0.45 * efficiency);
 
-        if (gx >= 0 && gx < this.gridWidth && gy >= 0 && gy < this.gridHeight) {
-          const cIdx = gy * this.gridWidth + gx;
-          if (this.wallGrid[cIdx] === 0) {
-            const timeSince = this.simTime - this.lastVisitGrid[cIdx];
-            const baseStr = isReturning ? 58.0 : 17.0;
-            const depAmount = saturatingDeposition(baseStr, timeSince, 0.06, depField[cIdx]);
-            depField[cIdx] = Math.min(100.0, depField[cIdx] + depAmount);
-            this.lastVisitGrid[cIdx] = this.simTime;
+        const steps = Math.max(
+          1,
+          Math.ceil(
+            Math.hypot(px - this.prevX[i], py - this.prevY[i]) / (cs * 0.9)
+          )
+        );
+        for (let sIdx = 1; sIdx <= steps; sIdx++) {
+          const t = sIdx / steps;
+          const sx = this.prevX[i] + (px - this.prevX[i]) * t;
+          const sy = this.prevY[i] + (py - this.prevY[i]) * t;
+          this.depositScent(depField, sx, sy, baseStr, isReturning);
+        }
 
-            // Multi-cell footprint for bold luminous returning highways
-            if (isReturning) {
-              const nStr = baseStr * 0.52;
-              const offsets = [-1, 1];
-              for (const ox of offsets) {
-                const ngx = gx + ox;
-                if (ngx >= 0 && ngx < this.gridWidth) {
-                  const nIdx = gy * this.gridWidth + ngx;
-                  if (this.wallGrid[nIdx] === 0) {
-                    depField[nIdx] = Math.min(100.0, depField[nIdx] + nStr * 0.35);
-                  }
-                }
-              }
-              for (const oy of offsets) {
-                const ngy = gy + oy;
-                if (ngy >= 0 && ngy < this.gridHeight) {
-                  const nIdx = ngy * this.gridWidth + gx;
-                  if (this.wallGrid[nIdx] === 0) {
-                    depField[nIdx] = Math.min(100.0, depField[nIdx] + nStr * 0.35);
-                  }
-                }
-              }
-
-              // Subtle emerald-cyan trail micro-sparkles on active highways
-              if (Math.random() < 0.14 && this.sparks.length < 90) {
-                this.sparks.push({
-                  x: px + (Math.random() - 0.5) * 6,
-                  y: py + (Math.random() - 0.5) * 6,
-                  vx: (Math.random() - 0.5) * 0.8,
-                  vy: (Math.random() - 0.5) * 0.8,
-                  color: '#00e676',
-                  life: 1.0,
-                  maxLife: 0.32,
-                  size: 1.5,
-                });
-              }
-            }
-          }
+        // Bright micro-sparkles riding the returning highways
+        if (isReturning && Math.random() < 0.16 && this.sparks.length < 90) {
+          this.sparks.push({
+            x: px + (Math.random() - 0.5) * 6,
+            y: py + (Math.random() - 0.5) * 6,
+            vx: (Math.random() - 0.5) * 0.8,
+            vy: (Math.random() - 0.5) * 0.8,
+            color: '#00e676',
+            life: 1.0,
+            maxLife: 0.32,
+            size: 1.5,
+          });
         }
       }
+
+      // Remember where we were, for next tick's trail interpolation.
+      this.prevX[i] = px;
+      this.prevY[i] = py;
+      this.pathLen[i] += currentSpeed * dt;
 
       // Social Information Transfer (Antennation) via Spatial Hash Grid
       if (currentState === AntState.FORAGING && this.stepCounter % 3 === 0) {

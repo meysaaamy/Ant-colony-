@@ -22,7 +22,7 @@ no network, no AI service calls.
 |---|---|
 | **File** | `dist/Ant-Colony-Scent-Painting.apk` |
 | **Package** | `com.app.antcolony` |
-| **Version** | 1.1.0 (versionCode 3) |
+| **Version** | 1.2.0 (versionCode 4) |
 | **Min / target SDK** | **21** / 34 — installs on Android 5.0+ |
 | **Signature** | **v1 (JAR) + v2** APK Signature Scheme, zip-aligned |
 | **Permissions** | *none* — fully offline, no INTERNET permission |
@@ -89,22 +89,26 @@ paint tools, a rotating dashed ring with dissolve shimmer for the eraser.
 The same triad drives the world renderer: pheromone deposition is tinted emerald / sapphire /
 crimson, so the canvas and the chrome speak one colour language.
 
-### Scent field
+### Scent field — spectral mixing
 
 Two channels share the substrate and are blended **per cell** (`app/src/sim/palette.ts`):
 
 | Channel | Laid by | Colour |
 |---|---|---|
-| Food scent | ants returning with food | emerald `#12e880` |
-| Home scent | outbound ants marking the way back | sapphire `#2076ff` |
+| Food scent | ants returning with food | emerald `#00e676` + warm amber aura |
+| Home scent | outbound ants marking the way back | cobalt `#1c3ad0` → electric cyan `#22e2ff` |
 | Alarm | danger pulse, 3.5× decay | crimson |
 
-Where both pass through the same cell, the weights mix into a **new hue** — turquoise drifting to
-aqua as the ratio approaches 50/50 — never a flat overlay. Brightness is the traffic itself: quiet
+Where both pass through the same cell, the local ratio mixes them into a **new hue** — aquamarine
+and turquoise at balance, **prismatic white-gold** at peak overlap. The core keeps its hue while a
+separate, wider aura pass warms the air around food trails and cools it around home trails. Brightness is the traffic itself: quiet
 ground stays dim, busy corridors climb to an incandescent core. `blendScent` is pure and
 allocation-free, and is unit-tested for hue, mixture and traffic response.
 
-### Ant intelligence
+### Ant intelligence — shortest-path locking
+
+*Bullet points below are the behaviours verified in `scripts/test-sim.mjs`.*
+
 
 Each tick an ant samples a **five-ray fan** ahead of it, weighting every ray by concentration *and*
 alignment, so the colony converges on the shortest well-travelled corridor instead of oscillating
