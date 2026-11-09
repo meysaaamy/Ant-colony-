@@ -1,0 +1,1165 @@
+import {
+  AntState,
+  SimulationConfig,
+  FoodCluster,
+  Nest,
+  PresetType,
+  SparkParticle,
+  SporeMote,
+} from './types';
+import {
+  weberFechner,
+  exponentialEvaporation,
+  saturatingDeposition,
+  computeAntennaPositions,
+  computeTropotaxisSteering,
+  lineOfSight,
+  resolveWallCollision,
+  hashCoord,
+  computeWhiskerAvoidance,
+} from './math';
+
+export class SimulationEngine {
+  public config: SimulationConfig;
+
+  // Grid dimensions
+  public gridWidth: number;
+  public gridHeight: number;
+  public totalCells: number;
+
+  // Pheromone grids (Float32Array) - double buffered for ping-pong diffusion
+  public foodTrail: Float32Array;
+  public foodTrailNext: Float32Array;
+
+  public homeGuide: Float32Array;
+  public homeGuideNext: Float32Array;
+
+  public alarm: Float32Array;
+  public alarmNext: Float32Array;
+
+  // Obstacle grid: 1 = wall, 0 = open
+  public wallGrid: Uint8Array;
+  public wallDirty: boolean = true;
+
+  // Last visit timestamp per cell for age-attenuation (Float32Array)
+  public lastVisitGrid: Float32Array;
+  public simTime: number = 0;
+
+  // Structure of Arrays (SoA) for up to 3,000 ants
+  public readonly MAX_AGENTS = 3000;
+  public activeCount: number = 0;
+
+  public x: Float32Array;
+  public y: Float32Array;
+  public vx: Float32Array;
+  public vy: Float32Array;
+  public angle: Float32Array;
+  public state: Uint8Array;
+  public homeDx: Float32Array;
+  public homeDy: Float32Array;
+  public legPhase: Float32Array;
+  public pheromoneTimer: Float32Array;
+  public alarmTimer: Float32Array;
+  public antennationTimer: Float32Array;
+  public wanderVelocity: Float32Array;
+  public stuckTimer: Float32Array;
+  public lastSampleX: Float32Array;
+  public lastSampleY: Float32Array;
+
+  // Spatial Hash Grid for O(1) neighbor lookups and zero allocation
+  public hashCellSize: number;
+  public hashCols: number;
+  public hashRows: number;
+  public hashHead: Int32Array;
+  public hashNext: Int32Array;
+
+  // World objects
+  public nest: Nest;
+  public foodClusters: FoodCluster[] = [];
+  public sparks: SparkParticle[] = [];
+  public motes: SporeMote[] = [];
+
+  // Active preset
+  public activePreset: PresetType = 'sanctuary';
+
+  // Performance scaling
+  public qualityThrottleDiffusion: boolean = false;
+  private stepCounter: number = 0;
+
+  // Event callbacks for audio/haptics/UI
+  public onFoodDelivered?: () => void;
+  public onAntSpawned?: () => void;
+  public onFoodHarvested?: (x: number, y: number) => void;
+  public onColonyCapacity?: () => void;
+
+  constructor(customConfig?: Partial<SimulationConfig>) {
+    const worldW = customConfig?.worldWidth ?? 1080;
+    const worldH = customConfig?.worldHeight ?? 1440;
+    const cellSize = customConfig?.cellSize ?? 6;
+
+    this.gridWidth = Math.floor(worldW / cellSize);
+    this.gridHeight = Math.floor(worldH / cellSize);
+    this.totalCells = this.gridWidth * this.gridHeight;
+
+    this.config = {
+      worldWidth: worldW,
+      worldHeight: worldH,
+      cellSize,
+      gridWidth: this.gridWidth,
+      gridHeight: this.gridHeight,
+      maxPopulation: customConfig?.maxPopulation ?? 600,
+      evaporationRate: customConfig?.evaporationRate ?? 0.016,
+      diffusionRate: customConfig?.diffusionRate ?? 0.12,
+      alarmEvapMultiplier: customConfig?.alarmEvapMultiplier ?? 3.5,
+      antBaseSpeed: customConfig?.antBaseSpeed ?? 2.4,
+      antennaAngle: customConfig?.antennaAngle ?? 0.61, // ~35 deg
+      antennaDistance: customConfig?.antennaDistance ?? 18,
+      trailSensitivity: customConfig?.trailSensitivity ?? 1.25,
+      wanderStrength: customConfig?.wanderStrength ?? 0.28,
+      brushRadius: customConfig?.brushRadius ?? 32,
+      brushIntensity: customConfig?.brushIntensity ?? 45,
+      timeScale: customConfig?.timeScale ?? 1,
+      pheromoneRenderMode: customConfig?.pheromoneRenderMode ?? 'glow',
+    };
+
+    // Preallocate pheromone arrays
+    this.foodTrail = new Float32Array(this.totalCells);
+    this.foodTrailNext = new Float32Array(this.totalCells);
+
+    this.homeGuide = new Float32Array(this.totalCells);
+    this.homeGuideNext = new Float32Array(this.totalCells);
+
+    this.alarm = new Float32Array(this.totalCells);
+    this.alarmNext = new Float32Array(this.totalCells);
+
+    this.wallGrid = new Uint8Array(this.totalCells);
+    this.lastVisitGrid = new Float32Array(this.totalCells);
+
+    // Preallocate SoA agent arrays
+    this.x = new Float32Array(this.MAX_AGENTS);
+    this.y = new Float32Array(this.MAX_AGENTS);
+    this.vx = new Float32Array(this.MAX_AGENTS);
+    this.vy = new Float32Array(this.MAX_AGENTS);
+    this.angle = new Float32Array(this.MAX_AGENTS);
+    this.state = new Uint8Array(this.MAX_AGENTS);
+    this.homeDx = new Float32Array(this.MAX_AGENTS);
+    this.homeDy = new Float32Array(this.MAX_AGENTS);
+    this.legPhase = new Float32Array(this.MAX_AGENTS);
+    this.pheromoneTimer = new Float32Array(this.MAX_AGENTS);
+    this.alarmTimer = new Float32Array(this.MAX_AGENTS);
+    this.antennationTimer = new Float32Array(this.MAX_AGENTS);
+    this.wanderVelocity = new Float32Array(this.MAX_AGENTS);
+    this.stuckTimer = new Float32Array(this.MAX_AGENTS);
+    this.lastSampleX = new Float32Array(this.MAX_AGENTS);
+    this.lastSampleY = new Float32Array(this.MAX_AGENTS);
+
+    // Spatial hash grid (cell size 24 logical units)
+    this.hashCellSize = 24;
+    this.hashCols = Math.ceil(worldW / this.hashCellSize);
+    this.hashRows = Math.ceil(worldH / this.hashCellSize);
+    const hashTotal = this.hashCols * this.hashRows;
+    this.hashHead = new Int32Array(hashTotal);
+    this.hashNext = new Int32Array(this.MAX_AGENTS);
+
+    // Initialize Nest
+    this.nest = {
+      x: worldW * 0.25,
+      y: worldH * 0.5,
+      radius: 46,
+      storedFood: 0,
+      spawnAccumulator: 0,
+      pulseAnim: 0,
+      deliveryPulse: 0,
+      ringPhase: 0,
+    };
+
+    // Initialize ambient spore motes
+    this.initMotes(36);
+
+    // Load initial scenario preset
+    this.loadPreset('sanctuary');
+  }
+
+  public initMotes(count: number) {
+    this.motes = [];
+    for (let i = 0; i < count; i++) {
+      this.motes.push({
+        x: Math.random() * this.config.worldWidth,
+        y: Math.random() * this.config.worldHeight,
+        vx: (Math.random() - 0.5) * 0.25,
+        vy: (Math.random() - 0.5) * 0.25 - 0.1,
+        size: 1.0 + Math.random() * 2.0,
+        alpha: 0.15 + Math.random() * 0.35,
+        pulseSpeed: 1.5 + Math.random() * 2.0,
+        phase: Math.random() * Math.PI * 2,
+      });
+    }
+  }
+
+  public spawnAnt(x: number, y: number, initialAngle?: number): boolean {
+    if (this.activeCount >= this.MAX_AGENTS || this.activeCount >= this.config.maxPopulation) {
+      return false;
+    }
+
+    const idx = this.activeCount;
+    const ang = initialAngle !== undefined ? initialAngle : Math.random() * Math.PI * 2;
+    this.x[idx] = x;
+    this.y[idx] = y;
+    this.vx[idx] = Math.cos(ang) * this.config.antBaseSpeed;
+    this.vy[idx] = Math.sin(ang) * this.config.antBaseSpeed;
+    this.angle[idx] = ang;
+    this.state[idx] = AntState.FORAGING;
+    this.homeDx[idx] = 0;
+    this.homeDy[idx] = 0;
+    this.legPhase[idx] = Math.random() * 8;
+    this.pheromoneTimer[idx] = Math.random() * 0.2;
+    this.alarmTimer[idx] = 0;
+    this.antennationTimer[idx] = 0;
+    this.wanderVelocity[idx] = 0;
+    this.stuckTimer[idx] = 0;
+    this.lastSampleX[idx] = x;
+    this.lastSampleY[idx] = y;
+
+    this.activeCount++;
+    return true;
+  }
+
+  public clearPheromones() {
+    this.foodTrail.fill(0);
+    this.foodTrailNext.fill(0);
+    this.homeGuide.fill(0);
+    this.homeGuideNext.fill(0);
+    this.alarm.fill(0);
+    this.alarmNext.fill(0);
+    this.lastVisitGrid.fill(0);
+  }
+
+  public resetWorld() {
+    this.loadPreset(this.activePreset);
+  }
+
+  public loadPreset(preset: PresetType) {
+    this.activePreset = preset;
+    this.activeCount = 0;
+    this.clearPheromones();
+    this.wallGrid.fill(0);
+    this.wallDirty = true;
+    this.foodClusters = [];
+    this.sparks = [];
+
+    const W = this.config.worldWidth;
+    const H = this.config.worldHeight;
+
+    if (preset === 'sanctuary') {
+      // Open Sanctuary: Nest on the left-center, 3 nutrient groves, zero obstacles
+      this.nest.x = W * 0.22;
+      this.nest.y = H * 0.5;
+      this.nest.storedFood = 0;
+      this.nest.spawnAccumulator = 0;
+
+      // 3 Emerald food groves
+      this.foodClusters.push({
+        id: 1,
+        x: W * 0.76,
+        y: H * 0.28,
+        radius: 38,
+        initialAmount: 320,
+        currentAmount: 320,
+        variant: 0,
+        pulsePhase: 0,
+      });
+
+      this.foodClusters.push({
+        id: 2,
+        x: W * 0.82,
+        y: H * 0.52,
+        radius: 44,
+        initialAmount: 480,
+        currentAmount: 480,
+        variant: 2,
+        pulsePhase: 1.2,
+      });
+
+      this.foodClusters.push({
+        id: 3,
+        x: W * 0.68,
+        y: H * 0.78,
+        radius: 36,
+        initialAmount: 300,
+        currentAmount: 300,
+        variant: 4,
+        pulsePhase: 2.5,
+      });
+
+      // Spawn starter colony of 140 ants
+      const initialPop = Math.min(this.config.maxPopulation, 160);
+      for (let i = 0; i < initialPop; i++) {
+        const offsetR = Math.random() * (this.nest.radius - 8);
+        const offsetA = Math.random() * Math.PI * 2;
+        this.spawnAnt(this.nest.x + Math.cos(offsetA) * offsetR, this.nest.y + Math.sin(offsetA) * offsetR);
+      }
+    } else if (preset === 'double_bridge') {
+      // Deneubourg's Double Bridge experiment:
+      // Nest on left (x=180), Food on right (x=900)
+      // Solid basalt wall barrier with two bridge paths:
+      // 1. Short branch (straight/shallow diamond, length 1x)
+      // 2. Long branch (wide loop diamond, length 2x)
+      this.nest.x = W * 0.16;
+      this.nest.y = H * 0.5;
+      this.nest.storedFood = 0;
+      this.nest.spawnAccumulator = 0;
+
+      // Food cluster on right side
+      this.foodClusters.push({
+        id: 1,
+        x: W * 0.84,
+        y: H * 0.5,
+        radius: 48,
+        initialAmount: 900,
+        currentAmount: 900,
+        variant: 1,
+        pulsePhase: 0.5,
+      });
+
+      // Sculpt basalt barrier with the two asymmetric bridges
+      // Fill central barrier leaving only the two bridge channels
+      const midX = W * 0.5;
+      const barrierWidth = W * 0.52;
+      const startX = midX - barrierWidth * 0.5;
+      const endX = midX + barrierWidth * 0.5;
+
+      // Build obstacle block in the middle
+      this.paintWallBox(startX, H * 0.18, endX, H * 0.82);
+
+      // Carve Short Branch (upper bridge, gentle angle, length L)
+      this.carveTunnel(this.nest.x + 40, H * 0.5, startX + 60, H * 0.34, 34);
+      this.carveTunnel(startX + 60, H * 0.34, endX - 60, H * 0.34, 34);
+      this.carveTunnel(endX - 60, H * 0.34, this.foodClusters[0].x - 40, H * 0.5, 34);
+
+      // Carve Long Branch (lower bridge, wide detour loop, length ~2L)
+      this.carveTunnel(this.nest.x + 40, H * 0.5, startX + 40, H * 0.64, 34);
+      this.carveTunnel(startX + 40, H * 0.64, midX, H * 0.74, 34);
+      this.carveTunnel(midX, H * 0.74, endX - 40, H * 0.64, 34);
+      this.carveTunnel(endX - 40, H * 0.64, this.foodClusters[0].x - 40, H * 0.5, 34);
+
+      // Spawn starter colony
+      const initialPop = Math.min(this.config.maxPopulation, 220);
+      for (let i = 0; i < initialPop; i++) {
+        const offsetR = Math.random() * (this.nest.radius - 8);
+        const offsetA = Math.random() * Math.PI * 2;
+        this.spawnAnt(this.nest.x + Math.cos(offsetA) * offsetR, this.nest.y + Math.sin(offsetA) * offsetR);
+      }
+    } else if (preset === 'labyrinth') {
+      // Subterranean Labyrinth: Organic cave network with choke points and 2 deep vaults
+      this.nest.x = W * 0.18;
+      this.nest.y = H * 0.22;
+      this.nest.storedFood = 0;
+      this.nest.spawnAccumulator = 0;
+
+      // 2 Deep nutrient vaults
+      this.foodClusters.push({
+        id: 1,
+        x: W * 0.82,
+        y: H * 0.82,
+        radius: 46,
+        initialAmount: 600,
+        currentAmount: 600,
+        variant: 3,
+        pulsePhase: 0,
+      });
+
+      this.foodClusters.push({
+        id: 2,
+        x: W * 0.24,
+        y: H * 0.85,
+        radius: 42,
+        initialAmount: 500,
+        currentAmount: 500,
+        variant: 5,
+        pulsePhase: 1.8,
+      });
+
+      // Procedural cave network
+      this.paintWallBox(W * 0.05, H * 0.38, W * 0.72, H * 0.44);
+      this.paintWallBox(W * 0.32, H * 0.56, W * 0.95, H * 0.62);
+      this.paintWallBox(W * 0.48, H * 0.15, W * 0.54, H * 0.38);
+      this.paintWallBox(W * 0.38, H * 0.62, W * 0.44, H * 0.88);
+
+      // Irregular rock pillars
+      this.paintWallCircle(W * 0.74, H * 0.26, 38);
+      this.paintWallCircle(W * 0.62, H * 0.74, 44);
+      this.paintWallCircle(W * 0.22, H * 0.62, 34);
+
+      // Spawn starter colony
+      const initialPop = Math.min(this.config.maxPopulation, 180);
+      for (let i = 0; i < initialPop; i++) {
+        const offsetR = Math.random() * (this.nest.radius - 8);
+        const offsetA = Math.random() * Math.PI * 2;
+        this.spawnAnt(this.nest.x + Math.cos(offsetA) * offsetR, this.nest.y + Math.sin(offsetA) * offsetR);
+      }
+    }
+  }
+
+  private paintWallBox(x0: number, y0: number, x1: number, y1: number) {
+    const minGx = Math.max(0, Math.floor(Math.min(x0, x1) / this.config.cellSize));
+    const maxGx = Math.min(this.gridWidth - 1, Math.floor(Math.max(x0, x1) / this.config.cellSize));
+    const minGy = Math.max(0, Math.floor(Math.min(y0, y1) / this.config.cellSize));
+    const maxGy = Math.min(this.gridHeight - 1, Math.floor(Math.max(y0, y1) / this.config.cellSize));
+
+    for (let gy = minGy; gy <= maxGy; gy++) {
+      for (let gx = minGx; gx <= maxGx; gx++) {
+        this.wallGrid[gy * this.gridWidth + gx] = 1;
+      }
+    }
+    this.wallDirty = true;
+  }
+
+  private paintWallCircle(cx: number, cy: number, radius: number) {
+    const cs = this.config.cellSize;
+    const minGx = Math.max(0, Math.floor((cx - radius) / cs));
+    const maxGx = Math.min(this.gridWidth - 1, Math.floor((cx + radius) / cs));
+    const minGy = Math.max(0, Math.floor((cy - radius) / cs));
+    const maxGy = Math.min(this.gridHeight - 1, Math.floor((cy + radius) / cs));
+    const rSq = radius * radius;
+
+    for (let gy = minGy; gy <= maxGy; gy++) {
+      const dy = gy * cs + cs * 0.5 - cy;
+      for (let gx = minGx; gx <= maxGx; gx++) {
+        const dx = gx * cs + cs * 0.5 - cx;
+        if (dx * dx + dy * dy <= rSq) {
+          this.wallGrid[gy * this.gridWidth + gx] = 1;
+        }
+      }
+    }
+    this.wallDirty = true;
+  }
+
+  private carveTunnel(x0: number, y0: number, x1: number, y1: number, width: number) {
+    const cs = this.config.cellSize;
+    const dist = Math.hypot(x1 - x0, y1 - y0);
+    const steps = Math.ceil(dist / (cs * 0.8));
+    const r = width * 0.5;
+    const rSq = r * r;
+
+    for (let i = 0; i <= steps; i++) {
+      const t = i / steps;
+      const px = x0 + (x1 - x0) * t;
+      const py = y0 + (y1 - y0) * t;
+
+      const minGx = Math.max(0, Math.floor((px - r) / cs));
+      const maxGx = Math.min(this.gridWidth - 1, Math.floor((px + r) / cs));
+      const minGy = Math.max(0, Math.floor((py - r) / cs));
+      const maxGy = Math.min(this.gridHeight - 1, Math.floor((py + r) / cs));
+
+      for (let gy = minGy; gy <= maxGy; gy++) {
+        const dy = gy * cs + cs * 0.5 - py;
+        for (let gx = minGx; gx <= maxGx; gx++) {
+          const dx = gx * cs + cs * 0.5 - px;
+          if (dx * dx + dy * dy <= rSq) {
+            this.wallGrid[gy * this.gridWidth + gx] = 0;
+          }
+        }
+      }
+    }
+    this.wallDirty = true;
+  }
+
+  /**
+   * Main simulation tick.
+   * Fixed dt = 1/60s. Zero allocations inside this loop.
+   */
+  public step(dt: number) {
+    this.simTime += dt;
+    this.stepCounter++;
+
+    // 1. Update pheromone diffusion & evaporation
+    // Throttle diffusion to every 2nd frame if qualityThrottle engaged under heavy load
+    const doDiffusion = !this.qualityThrottleDiffusion || this.stepCounter % 2 === 0;
+
+    if (doDiffusion) {
+      this.diffuseAndEvaporate(dt * (this.qualityThrottleDiffusion ? 2.0 : 1.0));
+    }
+
+    // 2. Build Spatial Hash Grid for O(1) neighbor lookups
+    this.buildSpatialHash();
+
+    // 3. Update Nest animations
+    this.nest.ringPhase += dt * 1.5;
+    this.nest.pulseAnim = Math.sin(this.simTime * 2.8) * 0.5 + 0.5;
+    if (this.nest.deliveryPulse > 0) {
+      this.nest.deliveryPulse = Math.max(0, this.nest.deliveryPulse - dt * 2.5);
+    }
+
+    // 4. Update Agents
+    this.updateAgents(dt);
+
+    // 5. Update Food Clusters
+    for (let i = 0; i < this.foodClusters.length; i++) {
+      this.foodClusters[i].pulsePhase += dt * 1.2;
+    }
+
+    // 6. Update Sparks & Motes
+    this.updateParticles(dt);
+  }
+
+  private buildSpatialHash() {
+    this.hashHead.fill(-1);
+    const hs = this.hashCellSize;
+    const cols = this.hashCols;
+    const rows = this.hashRows;
+
+    for (let i = 0; i < this.activeCount; i++) {
+      const gx = Math.max(0, Math.min(cols - 1, Math.floor(this.x[i] / hs)));
+      const gy = Math.max(0, Math.min(rows - 1, Math.floor(this.y[i] / hs)));
+      const cellIdx = gy * cols + gx;
+
+      this.hashNext[i] = this.hashHead[cellIdx];
+      this.hashHead[cellIdx] = i;
+    }
+  }
+
+  /**
+   * 3x3 weighted Laplacian stencil with CFL stability
+   * and strict zero-flux Neumann boundary conditions at walls and borders.
+   */
+  private diffuseAndEvaporate(dt: number) {
+    const W = this.gridWidth;
+    const H = this.gridHeight;
+    const D = Math.min(0.24, this.config.diffusionRate); // CFL clamp
+    const lambda = this.config.evaporationRate;
+    const evapFactor = Math.exp(-dt * lambda);
+    const alarmEvapFactor = Math.exp(-dt * lambda * this.config.alarmEvapMultiplier);
+
+    const D_center = 1.0 - 4.0 * D * 0.5;
+    const D_cardinal = D * 0.125;
+
+    const ft = this.foodTrail;
+    const ftNext = this.foodTrailNext;
+    const hg = this.homeGuide;
+    const hgNext = this.homeGuideNext;
+    const al = this.alarm;
+    const alNext = this.alarmNext;
+    const walls = this.wallGrid;
+
+    for (let y = 0; y < H; y++) {
+      const yOffset = y * W;
+      const yUp = y > 0 ? (y - 1) * W : yOffset;
+      const yDown = y < H - 1 ? (y + 1) * W : yOffset;
+
+      for (let x = 0; x < W; x++) {
+        const idx = yOffset + x;
+
+        // Chemicals cannot exist inside solid walls
+        if (walls[idx] === 1) {
+          ftNext[idx] = 0;
+          hgNext[idx] = 0;
+          alNext[idx] = 0;
+          continue;
+        }
+
+        const xLeft = x > 0 ? idx - 1 : idx;
+        const xRight = x < W - 1 ? idx + 1 : idx;
+        const idxUp = yUp + x;
+        const idxDown = yDown + x;
+
+        // Zero-flux boundary condition: if adjacent cell is wall, reflect current cell concentration
+        const c_ft = ft[idx];
+        const left_ft = walls[xLeft] === 1 ? c_ft : ft[xLeft];
+        const right_ft = walls[xRight] === 1 ? c_ft : ft[xRight];
+        const up_ft = walls[idxUp] === 1 ? c_ft : ft[idxUp];
+        const down_ft = walls[idxDown] === 1 ? c_ft : ft[idxDown];
+
+        const lap_ft = left_ft + right_ft + up_ft + down_ft - 4.0 * c_ft;
+        const val_ft = (c_ft + lap_ft * D) * evapFactor;
+        ftNext[idx] = val_ft > 0.0005 ? Math.min(100.0, val_ft) : 0;
+
+        // Home Guide
+        const c_hg = hg[idx];
+        const left_hg = walls[xLeft] === 1 ? c_hg : hg[xLeft];
+        const right_hg = walls[xRight] === 1 ? c_hg : hg[xRight];
+        const up_hg = walls[idxUp] === 1 ? c_hg : hg[idxUp];
+        const down_hg = walls[idxDown] === 1 ? c_hg : hg[idxDown];
+
+        const lap_hg = left_hg + right_hg + up_hg + down_hg - 4.0 * c_hg;
+        const val_hg = (c_hg + lap_hg * D) * evapFactor;
+        hgNext[idx] = val_hg > 0.0005 ? Math.min(100.0, val_hg) : 0;
+
+        // Alarm (3.5x faster evaporation)
+        const c_al = al[idx];
+        const left_al = walls[xLeft] === 1 ? c_al : al[xLeft];
+        const right_al = walls[xRight] === 1 ? c_al : al[xRight];
+        const up_al = walls[idxUp] === 1 ? c_al : al[idxUp];
+        const down_al = walls[idxDown] === 1 ? c_al : al[idxDown];
+
+        const lap_al = left_al + right_al + up_al + down_al - 4.0 * c_al;
+        const val_al = (c_al + lap_al * D) * alarmEvapFactor;
+        alNext[idx] = val_al > 0.0005 ? Math.min(100.0, val_al) : 0;
+      }
+    }
+
+    // Ping-pong buffer swap
+    this.foodTrail = ftNext;
+    this.foodTrailNext = ft;
+
+    this.homeGuide = hgNext;
+    this.homeGuideNext = hg;
+
+    this.alarm = alNext;
+    this.alarmNext = al;
+  }
+
+  private sampleField(field: Float32Array, x: number, y: number): number {
+    const cs = this.config.cellSize;
+    const gx = Math.floor(x / cs);
+    const gy = Math.floor(y / cs);
+
+    if (gx < 0 || gx >= this.gridWidth || gy < 0 || gy >= this.gridHeight) {
+      return 0;
+    }
+
+    const idx = gy * this.gridWidth + gx;
+    if (this.wallGrid[idx] === 1) {
+      return 0;
+    }
+
+    return field[idx];
+  }
+
+  public depositPheromone(
+    field: Float32Array,
+    x: number,
+    y: number,
+    radius: number,
+    baseStrength: number
+  ) {
+    const cs = this.config.cellSize;
+    const minGx = Math.max(0, Math.floor((x - radius) / cs));
+    const maxGx = Math.min(this.gridWidth - 1, Math.floor((x + radius) / cs));
+    const minGy = Math.max(0, Math.floor((y - radius) / cs));
+    const maxGy = Math.min(this.gridHeight - 1, Math.floor((y + radius) / cs));
+    const rSq = radius * radius;
+
+    for (let gy = minGy; gy <= maxGy; gy++) {
+      const cy = gy * cs + cs * 0.5;
+      const dy = cy - y;
+      const yOffset = gy * this.gridWidth;
+
+      for (let gx = minGx; gx <= maxGx; gx++) {
+        const cx = gx * cs + cs * 0.5;
+        const dx = cx - x;
+        const dSq = dx * dx + dy * dy;
+
+        if (dSq <= rSq) {
+          const idx = yOffset + gx;
+          if (this.wallGrid[idx] === 1) continue;
+
+          const falloff = 1.0 - Math.sqrt(dSq) / radius;
+          const current = field[idx];
+          const timeSinceVisit = this.simTime - this.lastVisitGrid[idx];
+          const added = saturatingDeposition(baseStrength * falloff, timeSinceVisit, 0.05, current);
+
+          field[idx] = Math.min(100.0, current + added);
+          this.lastVisitGrid[idx] = this.simTime;
+        }
+      }
+    }
+  }
+
+  private updateAgents(dt: number) {
+    const isWallFn = (gx: number, gy: number) => {
+      if (gx < 0 || gx >= this.gridWidth || gy < 0 || gy >= this.gridHeight) return true;
+      return this.wallGrid[gy * this.gridWidth + gx] === 1;
+    };
+
+    const cs = this.config.cellSize;
+    const antRadius = 4.0;
+    const baseSpeed = this.config.antBaseSpeed;
+    const sensitivity = this.config.trailSensitivity;
+    const antDistance = this.config.antennaDistance;
+    const antAngle = this.config.antennaAngle;
+    const wanderCoeff = this.config.wanderStrength;
+
+    const nestX = this.nest.x;
+    const nestY = this.nest.y;
+    const nestR = this.nest.radius;
+
+    for (let i = 0; i < this.activeCount; i++) {
+      let px = this.x[i];
+      let py = this.y[i];
+      let ang = this.angle[i];
+      const currentState = this.state[i];
+
+      // Sample alarm at current ant position
+      const localAlarm = this.sampleField(this.alarm, px, py);
+      if (localAlarm > 15.0) {
+        this.state[i] = AntState.ALARMED;
+        this.alarmTimer[i] = 1.5;
+      } else if (this.alarmTimer[i] > 0) {
+        this.alarmTimer[i] -= dt;
+        if (this.alarmTimer[i] <= 0 && currentState === AntState.ALARMED) {
+          this.state[i] = AntState.FORAGING;
+        }
+      }
+
+      // Orthokinesis & Klinokinesis: Speed boost during alarm or excitement
+      let currentSpeed = baseSpeed;
+      if (this.state[i] === AntState.ALARMED) {
+        currentSpeed = baseSpeed * 1.85; // Evasive speed boost
+      } else if (this.antennationTimer[i] > 0) {
+        this.antennationTimer[i] -= dt;
+        currentSpeed = baseSpeed * 1.4; // Excitement boost from antennation
+      }
+
+      // Bilateral Antenna Sensing tips
+      const sensors = computeAntennaPositions(px, py, ang, antDistance, antAngle);
+
+      // Check line of sight so chemical cannot be sensed through walls
+      const losL = lineOfSight(px, py, sensors.lx, sensors.ly, isWallFn, cs);
+      const losC = lineOfSight(px, py, sensors.cx, sensors.cy, isWallFn, cs);
+      const losR = lineOfSight(px, py, sensors.rx, sensors.ry, isWallFn, cs);
+
+      // Select target chemical field based on ant state
+      let activeField = this.foodTrail;
+      if (currentState === AntState.RETURNING) {
+        activeField = this.homeGuide;
+      }
+
+      const rawL = losL ? this.sampleField(activeField, sensors.lx, sensors.ly) : 0;
+      const rawC = losC ? this.sampleField(activeField, sensors.cx, sensors.cy) : 0;
+      const rawR = losR ? this.sampleField(activeField, sensors.rx, sensors.ry) : 0;
+
+      // Weber-Fechner sensory response S = ln(1 + C)
+      const sLeft = weberFechner(rawL);
+      const sCenter = weberFechner(rawC);
+      const sRight = weberFechner(rawR);
+      const sumStimulus = sLeft + sCenter + sRight;
+
+      // Natural Organic Exploration Wander:
+      // When exploring with no trail, maintain smooth momentum-correlated wander (natural sweeping arcs)
+      if (sumStimulus < 0.02) {
+        this.wanderVelocity[i] =
+          this.wanderVelocity[i] * 0.88 + (Math.random() - 0.5) * wanderCoeff * 0.38;
+      } else {
+        this.wanderVelocity[i] *= 0.6;
+      }
+      const wander = this.wanderVelocity[i] * (this.state[i] === AntState.ALARMED ? 2.5 : 1.0);
+
+      // Calculate chemical steering torque with autocatalytic shortest-path amplification
+      let steeringDelta = computeTropotaxisSteering(sLeft, sCenter, sRight, wander, sensitivity);
+
+      // Foragers on a trail: slight outward alignment away from nest to keep them rushing towards food
+      if (currentState === AntState.FORAGING && sumStimulus > 0.04) {
+        const toNestDx = px - nestX;
+        const toNestDy = py - nestY;
+        const awayAng = Math.atan2(toNestDy, toNestDx);
+        let angDiff = awayAng - ang;
+        while (angDiff > Math.PI) angDiff -= Math.PI * 2;
+        while (angDiff < -Math.PI) angDiff += Math.PI * 2;
+        steeringDelta += angDiff * 0.06;
+      }
+
+      // Proactive Whisker Obstacle Avoidance:
+      // Steers ants around walls and corners before impact
+      const whiskerTorque = computeWhiskerAvoidance(
+        px,
+        py,
+        ang,
+        antRadius + 11,
+        0.52,
+        isWallFn,
+        cs
+      );
+      if (whiskerTorque !== 0) {
+        steeringDelta += whiskerTorque * 0.6;
+      }
+
+      // Path Integration & Dead Reckoning for RETURNING ants
+      if (currentState === AntState.RETURNING) {
+        // Compute homeward heading vector
+        const toNestDx = nestX - px;
+        const toNestDy = nestY - py;
+        const nestDist = Math.hypot(toNestDx, toNestDy);
+        const homeAngle = Math.atan2(toNestDy, toNestDx);
+
+        let angleDiff = homeAngle - ang;
+        while (angleDiff > Math.PI) angleDiff -= Math.PI * 2;
+        while (angleDiff < -Math.PI) angleDiff += Math.PI * 2;
+
+        // Blend Path Integration with sensed Home Guide pheromones
+        const chemicalConfidence = Math.min(1.0, sumStimulus * 0.45);
+        const piWeight = Math.max(0.3, 1.0 - chemicalConfidence);
+        const steerHome = angleDiff * 0.14 * piWeight;
+
+        steeringDelta += steerHome;
+
+        // Food Delivery Check at Nest
+        if (nestDist < nestR) {
+          // Deliver nutrient
+          this.state[i] = AntState.FORAGING;
+          this.homeDx[i] = 0;
+          this.homeDy[i] = 0;
+          ang += Math.PI; // Turn back towards foraging grounds
+
+          this.nest.storedFood++;
+          this.nest.spawnAccumulator++;
+          this.nest.deliveryPulse = 1.0;
+
+          if (this.onFoodDelivered) this.onFoodDelivered();
+
+          // Every 3 stored food spawns 1 new ant at the nest
+          if (this.nest.spawnAccumulator >= 3) {
+            this.nest.spawnAccumulator = 0;
+            if (this.activeCount < this.config.maxPopulation) {
+              const spawnAngle = Math.random() * Math.PI * 2;
+              this.spawnAnt(nestX + Math.cos(spawnAngle) * 12, nestY + Math.sin(spawnAngle) * 12, spawnAngle);
+              if (this.onAntSpawned) this.onAntSpawned();
+            } else if (this.onColonyCapacity) {
+              this.onColonyCapacity();
+            }
+          }
+        }
+      } else if (currentState === AntState.FORAGING) {
+        // Check contact with food clusters
+        for (let f = 0; f < this.foodClusters.length; f++) {
+          const cluster = this.foodClusters[f];
+          if (cluster.currentAmount <= 0) continue;
+
+          const fdx = cluster.x - px;
+          const fdy = cluster.y - py;
+          const fDist = Math.hypot(fdx, fdy);
+
+          if (fDist < cluster.radius + antRadius) {
+            // Harvest food crystal unit!
+            cluster.currentAmount--;
+            this.state[i] = AntState.RETURNING;
+            ang += Math.PI; // Turn back towards nest
+
+            // Burst of emerald sparks
+            this.emitHarvestSparks(px, py);
+            if (this.onFoodHarvested) this.onFoodHarvested(px, py);
+            break;
+          }
+        }
+      }
+
+      // If alarmed, add repulsive klinokinesis turning away from alarm
+      if (this.state[i] === AntState.ALARMED) {
+        const alL = this.sampleField(this.alarm, sensors.lx, sensors.ly);
+        const alR = this.sampleField(this.alarm, sensors.rx, sensors.ry);
+        if (alL > alR) {
+          steeringDelta += 0.35; // Turn right away from danger
+        } else if (alR > alL) {
+          steeringDelta -= 0.35; // Turn left
+        } else {
+          steeringDelta += (Math.random() - 0.5) * 0.8;
+        }
+      }
+
+      // Apply steering
+      ang += steeringDelta;
+
+      // Integrate velocity
+      const nvx = Math.cos(ang) * currentSpeed;
+      const nvy = Math.sin(ang) * currentSpeed;
+
+      px += nvx;
+      py += nvy;
+
+      // Update leg animation phase based on distance traveled
+      this.legPhase[i] = (this.legPhase[i] + currentSpeed * 0.45) % 8;
+
+      // World boundary clamping
+      const worldMargin = 12;
+      if (px < worldMargin) {
+        px = worldMargin;
+        ang = Math.PI - ang;
+      } else if (px > this.config.worldWidth - worldMargin) {
+        px = this.config.worldWidth - worldMargin;
+        ang = Math.PI - ang;
+      }
+      if (py < worldMargin) {
+        py = worldMargin;
+        ang = -ang;
+      } else if (py > this.config.worldHeight - worldMargin) {
+        py = this.config.worldHeight - worldMargin;
+        ang = -ang;
+      }
+
+      // Circular wall collision with smooth tangent sliding & guaranteed exit velocity
+      const col = resolveWallCollision(px, py, antRadius, isWallFn, cs);
+      if (col.collided) {
+        px = col.x;
+        py = col.y;
+
+        const dot = nvx * col.normalX + nvy * col.normalY;
+        if (dot < 0) {
+          const slideVx = nvx - dot * col.normalX;
+          const slideVy = nvy - dot * col.normalY;
+          const slideSpeed = Math.hypot(slideVx, slideVy);
+
+          if (slideSpeed > 0.35) {
+            ang = Math.atan2(slideVy, slideVx);
+          } else {
+            // Head-on collision: slide along wall tangent away from wall normal
+            const tanX = -col.normalY;
+            const tanY = col.normalX;
+            const sign = Math.sin(this.simTime * 4.0 + i) > 0 ? 1 : -1;
+            ang = Math.atan2(tanY * sign, tanX * sign);
+          }
+        }
+      }
+
+      // Active Stuck Detector & Recovery:
+      // Guarantees ants never remain trapped in corners or dead-ends
+      if (this.stepCounter % 12 === 0) {
+        const movedDist = Math.hypot(px - this.lastSampleX[i], py - this.lastSampleY[i]);
+        if (movedDist < 3.0) {
+          this.stuckTimer[i] += dt * 12;
+          if (this.stuckTimer[i] > 0.22) {
+            // Trapped: turn around away from obstruction
+            ang += Math.PI * 0.75 + (Math.random() - 0.5) * 0.5;
+            this.stuckTimer[i] = 0;
+          }
+        } else {
+          this.stuckTimer[i] = 0;
+        }
+        this.lastSampleX[i] = px;
+        this.lastSampleY[i] = py;
+      }
+
+      // Bold, Vivid Pheromone Deposition:
+      // Returning ants deposit thick, radiant foodTrail highways with 3x3 footprint
+      this.pheromoneTimer[i] -= dt;
+      if (this.pheromoneTimer[i] <= 0) {
+        const isReturning = this.state[i] === AntState.RETURNING;
+        this.pheromoneTimer[i] = isReturning ? 0.045 : 0.10;
+
+        const depField = isReturning ? this.foodTrail : this.homeGuide;
+        const gx = Math.floor(px / cs);
+        const gy = Math.floor(py / cs);
+
+        if (gx >= 0 && gx < this.gridWidth && gy >= 0 && gy < this.gridHeight) {
+          const cIdx = gy * this.gridWidth + gx;
+          if (this.wallGrid[cIdx] === 0) {
+            const timeSince = this.simTime - this.lastVisitGrid[cIdx];
+            const baseStr = isReturning ? 34.0 : 12.0;
+            const depAmount = saturatingDeposition(baseStr, timeSince, 0.06, depField[cIdx]);
+            depField[cIdx] = Math.min(100.0, depField[cIdx] + depAmount);
+            this.lastVisitGrid[cIdx] = this.simTime;
+
+            // Multi-cell footprint for bold luminous returning highways
+            if (isReturning) {
+              const nStr = baseStr * 0.45;
+              const offsets = [-1, 1];
+              for (const ox of offsets) {
+                const ngx = gx + ox;
+                if (ngx >= 0 && ngx < this.gridWidth) {
+                  const nIdx = gy * this.gridWidth + ngx;
+                  if (this.wallGrid[nIdx] === 0) {
+                    depField[nIdx] = Math.min(100.0, depField[nIdx] + nStr * 0.35);
+                  }
+                }
+              }
+              for (const oy of offsets) {
+                const ngy = gy + oy;
+                if (ngy >= 0 && ngy < this.gridHeight) {
+                  const nIdx = ngy * this.gridWidth + gx;
+                  if (this.wallGrid[nIdx] === 0) {
+                    depField[nIdx] = Math.min(100.0, depField[nIdx] + nStr * 0.35);
+                  }
+                }
+              }
+
+              // Subtle emerald-cyan trail micro-sparkles on active highways
+              if (Math.random() < 0.14 && this.sparks.length < 90) {
+                this.sparks.push({
+                  x: px + (Math.random() - 0.5) * 6,
+                  y: py + (Math.random() - 0.5) * 6,
+                  vx: (Math.random() - 0.5) * 0.8,
+                  vy: (Math.random() - 0.5) * 0.8,
+                  color: '#00e676',
+                  life: 1.0,
+                  maxLife: 0.32,
+                  size: 1.5,
+                });
+              }
+            }
+          }
+        }
+      }
+
+      // Social Information Transfer (Antennation) via Spatial Hash Grid
+      if (currentState === AntState.FORAGING && this.stepCounter % 3 === 0) {
+        const hs = this.hashCellSize;
+        const hgx = Math.max(0, Math.min(this.hashCols - 1, Math.floor(px / hs)));
+        const hgy = Math.max(0, Math.min(this.hashRows - 1, Math.floor(py / hs)));
+
+        // Check current cell and neighboring cells
+        for (let ny = Math.max(0, hgy - 1); ny <= Math.min(this.hashRows - 1, hgy + 1); ny++) {
+          for (let nx = Math.max(0, hgx - 1); nx <= Math.min(this.hashCols - 1, hgx + 1); nx++) {
+            let neighborIdx = this.hashHead[ny * this.hashCols + nx];
+            while (neighborIdx !== -1) {
+              if (neighborIdx !== i && this.state[neighborIdx] === AntState.RETURNING) {
+                const ndx = this.x[neighborIdx] - px;
+                const ndy = this.y[neighborIdx] - py;
+                const distSq = ndx * ndx + ndy * ndy;
+
+                if (distSq < 16 * 16) {
+                  // Direct antennation contact!
+                  this.antennationTimer[i] = 0.8; // Excitement boost
+                  // Steer towards returning ant's origin direction
+                  ang = (ang + (this.angle[neighborIdx] + Math.PI)) * 0.5;
+                  break;
+                }
+              }
+              neighborIdx = this.hashNext[neighborIdx];
+            }
+          }
+        }
+      }
+
+      // Commit state back to arrays
+      this.x[i] = px;
+      this.y[i] = py;
+      this.angle[i] = ang;
+      this.vx[i] = Math.cos(ang) * currentSpeed;
+      this.vy[i] = Math.sin(ang) * currentSpeed;
+    }
+  }
+
+  public emitHarvestSparks(x: number, y: number) {
+    if (this.sparks.length > 80) return; // Particle cap for mobile budget
+    const count = 6;
+    for (let k = 0; k < count; k++) {
+      const ang = Math.random() * Math.PI * 2;
+      const spd = 1.0 + Math.random() * 3.5;
+      this.sparks.push({
+        x,
+        y,
+        vx: Math.cos(ang) * spd,
+        vy: Math.sin(ang) * spd,
+        color: '#00e676',
+        life: 1.0,
+        maxLife: 0.4 + Math.random() * 0.3,
+        size: 2.0 + Math.random() * 2.0,
+      });
+    }
+  }
+
+  private updateParticles(dt: number) {
+    // Update sparks
+    for (let i = this.sparks.length - 1; i >= 0; i--) {
+      const p = this.sparks[i];
+      p.x += p.vx;
+      p.y += p.vy;
+      p.vx *= 0.94;
+      p.vy *= 0.94;
+      p.life -= dt / p.maxLife;
+
+      if (p.life <= 0) {
+        this.sparks.splice(i, 1);
+      }
+    }
+
+    // Update ambient spore motes
+    const W = this.config.worldWidth;
+    const H = this.config.worldHeight;
+    for (let i = 0; i < this.motes.length; i++) {
+      const m = this.motes[i];
+      m.x += m.vx;
+      m.y += m.vy;
+      m.phase += dt * m.pulseSpeed;
+
+      if (m.x < 0) m.x = W;
+      if (m.x > W) m.x = 0;
+      if (m.y < 0) m.y = H;
+      if (m.y > H) m.y = 0;
+    }
+  }
+
+  public paintWallAt(x: number, y: number, radius: number) {
+    this.paintWallCircle(x, y, radius);
+
+    // Safely eject any ants trapped inside the new wall to nearest open cell
+    const cs = this.config.cellSize;
+    const isWallFn = (gx: number, gy: number) => {
+      if (gx < 0 || gx >= this.gridWidth || gy < 0 || gy >= this.gridHeight) return true;
+      return this.wallGrid[gy * this.gridWidth + gx] === 1;
+    };
+
+    for (let i = 0; i < this.activeCount; i++) {
+      const col = resolveWallCollision(this.x[i], this.y[i], 6, isWallFn, cs);
+      if (col.collided) {
+        this.x[i] = col.x;
+        this.y[i] = col.y;
+      }
+    }
+  }
+
+  public eraseAt(x: number, y: number, radius: number) {
+    // Never erase the Nest
+    const nestDist = Math.hypot(x - this.nest.x, y - this.nest.y);
+    if (nestDist < this.nest.radius + radius) {
+      this.nest.deliveryPulse = 0.5; // Pulse to indicate protected
+    }
+
+    const cs = this.config.cellSize;
+    const minGx = Math.max(0, Math.floor((x - radius) / cs));
+    const maxGx = Math.min(this.gridWidth - 1, Math.floor((x + radius) / cs));
+    const minGy = Math.max(0, Math.floor((y - radius) / cs));
+    const maxGy = Math.min(this.gridHeight - 1, Math.floor((y + radius) / cs));
+    const rSq = radius * radius;
+
+    let clearedWall = false;
+
+    for (let gy = minGy; gy <= maxGy; gy++) {
+      const cy = gy * cs + cs * 0.5;
+      const dy = cy - y;
+      const yOffset = gy * this.gridWidth;
+
+      for (let gx = minGx; gx <= maxGx; gx++) {
+        const cx = gx * cs + cs * 0.5;
+        const dx = cx - x;
+        if (dx * dx + dy * dy <= rSq) {
+          const idx = yOffset + gx;
+          this.foodTrail[idx] = 0;
+          this.homeGuide[idx] = 0;
+          this.alarm[idx] = 0;
+          if (this.wallGrid[idx] === 1) {
+            this.wallGrid[idx] = 0;
+            clearedWall = true;
+          }
+        }
+      }
+    }
+
+    if (clearedWall) {
+      this.wallDirty = true;
+    }
+
+    // Also remove any food cluster centers within radius
+    for (let f = this.foodClusters.length - 1; f >= 0; f--) {
+      const cl = this.foodClusters[f];
+      const d = Math.hypot(x - cl.x, y - cl.y);
+      if (d < radius + cl.radius * 0.5) {
+        this.foodClusters.splice(f, 1);
+      }
+    }
+  }
+
+  public addFoodCluster(x: number, y: number) {
+    // Don't spawn on top of nest
+    if (Math.hypot(x - this.nest.x, y - this.nest.y) < this.nest.radius + 30) return;
+
+    this.foodClusters.push({
+      id: Date.now() + Math.random(),
+      x,
+      y,
+      radius: 36 + Math.random() * 12,
+      initialAmount: 400,
+      currentAmount: 400,
+      variant: Math.floor(Math.random() * 6),
+      pulsePhase: Math.random() * Math.PI * 2,
+    });
+  }
+}

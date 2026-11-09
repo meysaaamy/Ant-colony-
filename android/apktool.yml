@@ -1,0 +1,33 @@
+version: 2.10.0
+apkFileName: ant-colony.apk
+isFrameworkApk: false
+usesFramework:
+  ids:
+  - 1
+  tag: null
+sdkInfo:
+  minSdkVersion: "24"
+  targetSdkVersion: "34"
+packageInfo:
+  forcedPackageId: "127"
+  renameManifestPackage: null
+versionInfo:
+  versionCode: "1"
+  versionName: "1.0.0"
+doNotCompress:
+- resources.arsc
+- png
+- jpg
+- jpeg
+- gif
+- webp
+- mp3
+- ogg
+- wav
+- mp4
+- ttf
+- woff
+- woff2
+- html
+- js
+- css
