@@ -84,18 +84,22 @@ export default function App() {
     const canvas = canvasRef.current;
     if (!canvas) return;
 
-    /* Size the simulation world to the device aspect so the cover-fit camera
-       never crops the nest or the nutrient groves on tall phones.
+    /* The world is sized to the *visible band* — the strip between the top
+       capsule and the world-controls card — not to the raw window. That band is
+       what the player can actually see, so matching its aspect means the plate
+       fills the frame with no wasted margins, and the camera ends up visibly
+       further back than a window-filling fit would allow.
 
-       The world is deliberately larger than before: the camera therefore sits
-       further back, the colony reads as one living plate of colour from a
-       distance, and the blue/green lattice stays legible as a fine RGB mesh
-       rather than a few fat smears. Ant sprites, brush and trail widths are
-       world-space, so they scale with the frame and keep their proportions. */
-    const viewportAspect = window.innerWidth / Math.max(1, window.innerHeight);
-    const worldHeight = 1720;
+       Chrome heights are estimated here (the chrome is not mounted yet on the
+       landing screen) and then measured for real by `resize` once the sandbox
+       opens; the world itself never needs to change again. */
+    const estTopChrome = 104;
+    const estBottomChrome = 200;
+    const bandHeight = Math.max(280, window.innerHeight - estTopChrome - estBottomChrome);
+    const bandAspect = window.innerWidth / bandHeight;
+    const worldHeight = 1560;
     const worldWidth = Math.round(
-      Math.max(560, Math.min(1080, worldHeight * viewportAspect))
+      Math.max(560, Math.min(1400, worldHeight * bandAspect))
     );
 
     const engine = new SimulationEngine({
@@ -130,17 +134,29 @@ export default function App() {
       const ctx = canvas.getContext('2d');
       if (!ctx) return;
       ctx.setTransform(1, 0, 0, 1, 0, 0);
-      // Contain fit: the whole plate — every vault, the fault line and the
-      // nest — stays in frame on any aspect, with dark space around it.
+      // Contain fit inside the *visible* band: measure how much of the window
+      // the top capsule and the bottom cockpit actually cover, then fit the
+      // whole plate into what is left. The camera therefore sits further back
+      // and nothing — nest, vaults, trail ends — hides behind the chrome.
+      const hud = document.querySelector('.hud-top');
+      const cockpit = document.querySelector('.tier1'); // top edge of the bottom stack
+      const hudRect = hud ? hud.getBoundingClientRect() : null;
+      const cockpitRect = cockpit ? cockpit.getBoundingClientRect() : null;
+      const topInset = hudRect && hudRect.bottom > 0 ? hudRect.bottom + 6 : 12;
+      const bottomInset = cockpitRect && cockpitRect.top > 0 ? h - cockpitRect.top + 6 : 12;
+      const availH = Math.max(180, h - topInset - bottomInset);
+
       const scale = Math.min(
         (w * dpr) / engine.config.worldWidth,
-        (h * dpr) / engine.config.worldHeight
+        (availH * dpr) / engine.config.worldHeight
       );
       const offsetX = (w * dpr - engine.config.worldWidth * scale) / 2;
-      const offsetY = (h * dpr - engine.config.worldHeight * scale) / 2;
+      const offsetY = topInset * dpr + (availH * dpr - engine.config.worldHeight * scale) / 2;
+      viewRef.current = { scale, offsetX, offsetY };
       ctx.setTransform(scale, 0, 0, scale, offsetX, offsetY);
     };
 
+    resizeRef.current = resize;
     resize();
     let resizeTimer: number | null = null;
     const onResize = () => {
@@ -222,6 +238,24 @@ export default function App() {
     };
   }, []);
 
+  /* Camera: the plate fits the band *between* the HUD and the cockpit, so no
+     part of the colony hides behind the chrome. Kept in a ref because both the
+     resize handler and the pointer mapping have to agree on it exactly. */
+  const viewRef = useRef({ scale: 1, offsetX: 0, offsetY: 0 });
+  const resizeRef = useRef<null | (() => void)>(null);
+
+  /* Entering the sandbox (or moving the sheet) changes how much of the window
+     the chrome covers, so the camera has to be re-fitted to the remaining band.
+     Two timers so it lands both before and after the cockpit transition. */
+  useEffect(() => {
+    const a = window.setTimeout(() => resizeRef.current?.(), 60);
+    const b = window.setTimeout(() => resizeRef.current?.(), 380);
+    return () => {
+      window.clearTimeout(a);
+      window.clearTimeout(b);
+    };
+  }, [screen, snap]);
+
   /* ── pointer ↔ world mapping ─────────────────────────────────────────── */
   const clientToWorld = useCallback((clientX: number, clientY: number) => {
     const canvas = canvasRef.current;
@@ -231,12 +265,7 @@ export default function App() {
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
     const px = (clientX - rect.left) * dpr;
     const py = (clientY - rect.top) * dpr;
-    const scale = Math.min(
-      (rect.width * dpr) / engine.config.worldWidth,
-      (rect.height * dpr) / engine.config.worldHeight
-    );
-    const offsetX = (rect.width * dpr - engine.config.worldWidth * scale) / 2;
-    const offsetY = (rect.height * dpr - engine.config.worldHeight * scale) / 2;
+    const { scale, offsetX, offsetY } = viewRef.current;
     return {
       x: Math.max(0, Math.min(engine.config.worldWidth, (px - offsetX) / scale)),
       y: Math.max(0, Math.min(engine.config.worldHeight, (py - offsetY) / scale)),

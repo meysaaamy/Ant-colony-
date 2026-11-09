@@ -22,6 +22,13 @@ import {
 /** Total standing nutrients below which the colony starts to feel the pinch. */
 const FEAST_LEVEL = 140;
 
+/**
+ * How far a forager can actually *see* a nutrient vault — roughly two and a
+ * half body-lengths. The old value was 300 logical units, more than a third of
+ * the plate, which made the colony look clairvoyant.
+ */
+const FOOD_SIGHT_RANGE = 96;
+
 export class SimulationEngine {
   public config: SimulationConfig;
 
@@ -1081,7 +1088,10 @@ export class SimulationEngine {
           const c = this.foodClusters[f];
           if (c.currentAmount <= 0) continue;
           const d = Math.hypot(c.x - px, c.y - py);
-          if (d > 300) continue;
+          // Real eyes, not omniscience: a forager notices a vault only when it
+          // is a few body-lengths away and in clear sight. Everything further
+          // out has to be found by searching or by following scent.
+          if (d > FOOD_SIGHT_RANGE) continue;
           if (best && d >= best.d) continue;
           if (!lineOfSight(px, py, c.x, c.y, isWallFn, cs)) continue;
           best = { d, a: Math.atan2(c.y - py, c.x - px) };

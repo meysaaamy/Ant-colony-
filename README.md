@@ -22,7 +22,7 @@ no network, no AI service calls.
 |---|---|
 | **File** | `dist/Ant-Colony-Scent-Painting.apk` |
 | **Package** | `com.app.antcolony` |
-| **Version** | 1.3.1 (versionCode 6) |
+| **Version** | 1.3.2 (versionCode 7) |
 | **Min / target SDK** | **21** / 34 — installs on Android 5.0+ |
 | **Signature** | **v1 (JAR) + v2** APK Signature Scheme, zip-aligned |
 | **Permissions** | *none* — fully offline, no INTERNET permission |
@@ -111,6 +111,11 @@ allocation-free, and is unit-tested for hue, mixture and traffic response.
 *Bullet points below are the behaviours verified in `scripts/test-sim.mjs`.*
 
 
+Foragers are not clairvoyant: a vault is noticed only within **96 logical units** (about two and a
+half body-lengths) and in clear sight — the old radius was 300, more than a third of the plate, and
+made the colony look like it was reading the map. Everything further away has to be found by
+searching or by following scent, which is why the first delivery now takes ~10–25 s instead of a few.
+
 Each tick an ant samples a **five-ray fan** ahead of it, weighting every ray by concentration *and*
 alignment, so the colony converges on the shortest well-travelled corridor instead of oscillating
 between equal branches; local tropotaxis then handles fine trail following. Layered near/mid/far
@@ -174,11 +179,13 @@ Kept intact from the source archive and re-tuned for the new world aspect:
 * **Compositor** (`app/src/sim/renderer.ts`) — cached terrain, per-cell chromatic blending with
   traffic-driven luminance, quarter-res bloom, faceted crystals, nest heartbeat, 24-frame ant sprite
   sheet, spore motes, vignette, and the touch ribbon/ripple/boundary layer.
-* **World sizing & camera** — the logical world is derived from the device aspect (height 1720,
-  width clamped 560–1080) and framed with a **contain** fit, so no vault, bridge or edge of the
-  plate is ever cropped — on tall phones the world fills the screen exactly, and on wide screens it
-  floats as a dark plate. The renderer clears the full device canvas each frame, so nothing leaks
-  into the void around it. The taller world puts the camera further back: ants hold their ~18 px silhouette
+* **World sizing & camera** — the world is sized to the **visible band** (the strip between the top
+  capsule and the world-controls card), not to the raw window: height 1560, width clamped 560–1400
+  from the band's own aspect. That band is then measured at runtime from the real chrome and the
+  plate is fitted into it, so the camera sits visibly further back and no vault, bridge or trail end
+  hides behind a panel. The renderer clears the full device canvas each frame, so nothing leaks into
+  the void. Ant sprites are drawn at 1.35× world scale, which holds a ~16 px silhouette at that
+  distance on a phone. The taller world puts the camera further back: ants hold their ~18 px silhouette
   thanks to world-space sprites and rim light, while the scent lattice resolves into a finer RGB
   mesh instead of a few fat smears. Brush radius scales with the frame so painting feels identical.
 * **Frame budget** — the per-cell colour solve is the hot pass; under load the FPS guard switches

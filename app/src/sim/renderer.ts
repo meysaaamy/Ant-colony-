@@ -44,6 +44,12 @@ export class SimulationRenderer {
 
   // Sprite dimensions
   private readonly SPRITE_FRAME_SIZE = 36;
+  /**
+   * World-space draw scale for the ant sprite and everything attached to it.
+   * The camera sits inside the HUD→cockpit band, which is well back from before;
+   * this keeps a ~14 px silhouette on a phone at that distance.
+   */
+  private readonly ANT_DRAW_SCALE = 1.35;
   private readonly SPRITE_FRAMES = 8;
 
   // Custom background image support (optional macro backdrop)
@@ -835,6 +841,7 @@ export class SimulationRenderer {
 
       ctx.save();
       ctx.translate(xs[i], ys[i]);
+      ctx.scale(this.ANT_DRAW_SCALE, this.ANT_DRAW_SCALE);
 
       // Radiant underglow halo for returning and alarmed ants
       if (state === 1) {
