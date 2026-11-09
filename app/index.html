@@ -12,9 +12,71 @@
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <title>Myrmecodia — Ant Colony Scent Painting</title>
     <link rel="stylesheet" href="./bundle.css" />
+    <style>
+      /* Branded boot state — replaced the instant React mounts. */
+      html, body { margin: 0; height: 100%; background: #03050a; }
+      .boot {
+        position: fixed;
+        inset: 0;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 14px;
+        background:
+          radial-gradient(70% 50% at 50% 42%, rgba(0, 240, 255, 0.07), transparent 70%),
+          radial-gradient(60% 45% at 50% 72%, rgba(255, 174, 0, 0.07), transparent 72%),
+          #03050a;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      }
+      .boot-dot {
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        background: #ffae00;
+        box-shadow: 0 0 14px rgba(255, 174, 0, 0.8), 0 0 34px rgba(255, 174, 0, 0.35);
+        animation: bootPulse 1.5s ease-in-out infinite;
+      }
+      .boot-text {
+        font-size: 11px;
+        font-weight: 600;
+        letter-spacing: 0.22em;
+        text-transform: uppercase;
+        color: rgba(233, 240, 250, 0.42);
+      }
+      .boot-error {
+        display: none;
+        max-width: 78vw;
+        text-align: center;
+        font-size: 11px;
+        line-height: 1.5;
+        color: rgba(255, 209, 220, 0.8);
+      }
+      @keyframes bootPulse {
+        0%, 100% { transform: scale(1); opacity: 0.85; }
+        50% { transform: scale(1.35); opacity: 1; }
+      }
+    </style>
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root">
+      <div class="boot">
+        <div class="boot-dot"></div>
+        <div class="boot-text">Awakening the colony</div>
+        <div class="boot-error" id="boot-error"></div>
+      </div>
+    </div>
+    <script>
+      /* Surface startup failures instead of leaving an empty obsidian screen. */
+      window.addEventListener('error', function (e) {
+        var el = document.getElementById('boot-error');
+        if (el) {
+          el.style.display = 'block';
+          el.textContent = 'Startup error: ' + (e.message || 'unknown');
+        }
+      });
+      document.addEventListener('gesturestart', function (e) { e.preventDefault(); });
+    </script>
     <script src="./bundle.js"></script>
   </body>
 </html>

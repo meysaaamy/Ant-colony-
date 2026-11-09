@@ -4,7 +4,7 @@ A bioluminescent, museum-grade **mobile sandbox for ant-colony neuroethology**, 
 signed, installable **Android APK** — no Android Studio, no Gradle, no SDK download required.
 
 ```
-dist/Ant-Colony-Scent-Painting.apk      ← the deliverable (421 KB, signed, offline)
+dist/Ant-Colony-Scent-Painting.apk      ← the deliverable (423 KB, signed, offline)
 ```
 
 The two uploaded archives (`*.zip`) were read, compared and merged into a single app: the newer
