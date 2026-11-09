@@ -72,14 +72,14 @@ export const FieldGuideModal: React.FC<FieldGuideModalProps> = ({
             </div>
             <div className="legend">
               <div className="legend-row">
-                <span className="legend-swatch" style={{ background: 'linear-gradient(90deg,#7a4f00,#ffae00,#fff3b0)', color: '#ffae00' }} />
+                <span className="legend-swatch" style={{ background: 'linear-gradient(90deg,#0a5c36,#00e676,#c9ffe4)', color: '#00e676' }} />
                 <span className="legend-name">Food recruitment</span>
                 <span className="legend-note">amber · λ slow</span>
               </div>
               <div className="legend-row">
                 <span className="legend-swatch" style={{ background: 'linear-gradient(90deg,#003b47,#00f0ff,#e0ffff)', color: '#00f0ff' }} />
                 <span className="legend-name">Homeward guide</span>
-                <span className="legend-note">cyan · λ slow</span>
+                <span className="legend-note">blue · λ slow</span>
               </div>
               <div className="legend-row">
                 <span className="legend-swatch" style={{ background: 'linear-gradient(90deg,#3a0210,#ff0a43,#ffd1dc)', color: '#ff0a43' }} />
@@ -88,7 +88,7 @@ export const FieldGuideModal: React.FC<FieldGuideModalProps> = ({
               </div>
             </div>
             <p className="guide-p" style={{ marginTop: 10 }}>
-              Three fields share one substrate. Overlapping amber and cyan produce aquamarine
+              Three fields share one substrate. Overlapping emerald and sapphire produce aquamarine
               filaments where outbound and inbound traffic truly merge; alarm blooms shatter
               the flow and scatter foragers until the crimson decays.
             </p>

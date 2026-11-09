@@ -8,6 +8,7 @@ import { BioSoundscape } from './audio/soundscape';
 import { TopHud } from './components/TopHud';
 import { Cockpit } from './components/Cockpit';
 import { ParameterSheet, PRESET_TITLES } from './components/ParameterSheet';
+import { Landing, ChallengeBanner, type PlayMode } from './components/Landing';
 import { FieldGuideModal } from './components/FieldGuideModal';
 import { toolById } from './components/icons';
 
@@ -56,6 +57,12 @@ export default function App() {
       return false;
     }
   });
+  const [screen, setScreen] = useState<'landing' | 'play'>('landing');
+  const [mode, setMode] = useState<PlayMode>('sandbox');
+  const [challengeLeft, setChallengeLeft] = useState(180);
+  const [challengeBase, setChallengeBase] = useState(0);
+  const [bestSandbox, setBestSandbox] = useState(0);
+  const [bestChallenge, setBestChallenge] = useState(0);
   const [telemetry, setTelemetry] = useState({
     antCount: 160,
     foodCount: 0,
@@ -339,6 +346,79 @@ export default function App() {
     [showToast]
   );
 
+  // ── bests ───────────────────────────────────────────────────────────
+  useEffect(() => {
+    try {
+      setBestSandbox(Number(localStorage.getItem('myrmecodia.best.sandbox') || 0) || 0);
+      setBestChallenge(Number(localStorage.getItem('myrmecodia.best.challenge') || 0) || 0);
+    } catch {
+      /* storage blocked in embedded contexts */
+    }
+  }, []);
+
+  const saveBest = useCallback((m: PlayMode, value: number) => {
+    if (value <= 0) return;
+    try {
+      const key = `myrmecodia.best.${m}`;
+      const prev = Number(localStorage.getItem(key) || 0) || 0;
+      if (value > prev) localStorage.setItem(key, String(value));
+    } catch {
+      /* ignore */
+    }
+    if (m === 'sandbox') setBestSandbox((v) => Math.max(v, value));
+    else setBestChallenge((v) => Math.max(v, value));
+  }, []);
+
+  // ── launch a session ────────────────────────────────────────────────
+  const startSession = useCallback(
+    (next: PlayMode) => {
+      const engine = engineRef.current;
+      setMode(next);
+      setScreen('play');
+      engine?.loadPreset(telemetry.preset);
+      if (next === 'challenge') {
+        setChallengeLeft(180);
+        setChallengeBase(Math.floor(engine?.nest.storedFood ?? 0));
+      }
+      showToast(next === 'challenge' ? '180 seconds — gather what you can' : 'Sandbox — paint as it suits you');
+    },
+    [showToast, telemetry.preset]
+  );
+
+  const endSession = useCallback(() => {
+    const engine = engineRef.current;
+    const gathered = Math.floor((engine?.nest.storedFood ?? 0) - challengeBase);
+    if (mode === 'challenge') saveBest('challenge', gathered);
+    setScreen('landing');
+    setChallengeLeft(180);
+  }, [challengeBase, mode, saveBest]);
+
+  // ── challenge countdown ─────────────────────────────────────────────
+  useEffect(() => {
+    if (screen !== 'play' || mode !== 'challenge') return;
+    const id = window.setInterval(() => {
+      setChallengeLeft((t) => {
+        if (t <= 1) {
+          window.clearInterval(id);
+          return 0;
+        }
+        return t - 1;
+      });
+    }, 1000);
+    return () => window.clearInterval(id);
+  }, [screen, mode]);
+
+  useEffect(() => {
+    if (screen === 'play' && mode === 'challenge' && challengeLeft === 0) {
+      const engine = engineRef.current;
+      const gathered = Math.floor((engine?.nest.storedFood ?? 0) - challengeBase);
+      saveBest('challenge', gathered);
+      showToast(`Time — ${gathered} food delivered`);
+      setScreen('landing');
+      setChallengeLeft(180);
+    }
+  }, [challengeLeft, screen, mode, challengeBase, saveBest, showToast]);
+
   const clearTrails = useCallback(() => {
     engineRef.current?.clearPheromones();
     showToast('Scent field cleared');
@@ -436,7 +516,11 @@ export default function App() {
   );
 
   return (
-    <div className="app" style={accentVars}>
+    <div
+      className={`app${screen === 'landing' ? ' is-landing' : ''}${mode === 'challenge' && screen === 'play' ? ' is-challenge' : ''}`}
+      style={accentVars}
+      data-screen={screen}
+    >
       <canvas
         ref={canvasRef}
         className="world"
@@ -451,6 +535,15 @@ export default function App() {
         }}
       />
 
+      {screen === 'play' && mode === 'challenge' && (
+        <ChallengeBanner
+          secondsLeft={challengeLeft}
+          score={Math.max(0, telemetry.foodCount - challengeBase)}
+          onExit={endSession}
+        />
+      )}
+
+      {screen === 'play' && (
       <div className={`chrome${chromeFaded ? ' is-dimmed' : ''}`}>
         <TopHud
           antCount={telemetry.antCount}
@@ -499,11 +592,29 @@ export default function App() {
           />
         </div>
       </div>
+      )}
 
-      {!onboarded && (
+      {screen === 'landing' && (
+        <Landing
+          preset={telemetry.preset}
+          onSelectPreset={(p) => {
+            engineRef.current?.loadPreset(p);
+            setTelemetry((prev) => ({ ...prev, preset: p }));
+          }}
+          onPlay={startSession}
+          onOpenGuide={() => setGuideOpen(true)}
+          onOpenBests={() => setGuideOpen(true)}
+          antCount={telemetry.antCount}
+          foodCount={telemetry.foodCount}
+          bestSandbox={bestSandbox}
+          bestChallenge={bestChallenge}
+        />
+      )}
+
+      {screen === 'play' && !onboarded && (
         <div className="hint glass" role="status">
           <span className="dot" aria-hidden />
-          <span>Paint an amber trail from the nest to a crystal</span>
+          <span>Paint a green trail from the nest to a crystal</span>
         </div>
       )}
 

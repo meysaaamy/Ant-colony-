@@ -4,7 +4,7 @@ A bioluminescent, museum-grade **mobile sandbox for ant-colony neuroethology**, 
 signed, installable **Android APK** — no Android Studio, no Gradle, no SDK download required.
 
 ```
-dist/Ant-Colony-Scent-Painting.apk      ← the deliverable (197 KB, signed, offline)
+dist/Ant-Colony-Scent-Painting.apk      ← the deliverable (201 KB, signed, offline)
 ```
 
 The two uploaded archives (`*.zip`) were read, compared and merged into a single app: the newer
@@ -22,7 +22,7 @@ no network, no AI service calls.
 |---|---|
 | **File** | `dist/Ant-Colony-Scent-Painting.apk` |
 | **Package** | `com.app.antcolony` |
-| **Version** | 1.0.1 (versionCode 2) |
+| **Version** | 1.1.0 (versionCode 3) |
 | **Min / target SDK** | **21** / 34 — installs on Android 5.0+ |
 | **Signature** | **v1 (JAR) + v2** APK Signature Scheme, zip-aligned |
 | **Permissions** | *none* — fully offline, no INTERNET permission |
@@ -44,6 +44,14 @@ a procedural bioluminescent composition shipped at all five densities.
 ---
 
 ## 2. The experience
+
+**Entry screen.** The app opens on an editorial landing page — serif display headline
+("Small world. Big wonder."), amber as the single call to action, and three starting worlds
+(Sanctuary, Double Bridge, Labyrinth) as preview cards with bespoke SVG map thumbnails. Two ways in:
+
+- **Play sandbox** — unrestricted; paint and watch.
+- **180-second challenge** — countdown banner, live score, persisted personal best
+  (`localStorage['myrmecodia.best.challenge']`).
 
 A full-bleed, edge-to-edge canvas of dark substrate. Pheromone highways, faceted emerald crystals
 and the breathing nest crater float under obsidian glass chrome that dissolves to 22 % opacity the
@@ -71,15 +79,40 @@ paint tools, a rotating dashed ring with dissolve shimmer for the eraser.
 
 | Tool | Incandescent core | Saturated accent | Ambient halo |
 |---|---|---|---|
-| Food trail | `#fff3b0` | `#ffae00` | `rgba(255,174,0,.20)` |
-| Home trail | `#e0ffff` | `#00f0ff` | `rgba(0,240,255,.20)` |
+| Food trail | `#c9ffe4` | `#00e676` | `rgba(0,230,118,.22)` |
+| Home trail | `#dbe8ff` | `#2f7bff` | `rgba(47,123,255,.22)` |
 | Alarm | `#ffd1dc` | `#ff0a43` | `rgba(255,10,67,.20)` |
 | Food cluster | `#b9f6ca` | `#00e676` | `rgba(0,230,118,.20)` |
 | Wall | `#cbd5e1` | `#64748b` | `rgba(100,116,139,.20)` |
 | Eraser | `#ffffff` | `#94a3b8` | `rgba(148,163,184,.16)` |
 
-The same triad drives the world renderer: pheromone deposition is tinted amber / cyan / crimson, so
-the canvas and the chrome speak one colour language.
+The same triad drives the world renderer: pheromone deposition is tinted emerald / sapphire /
+crimson, so the canvas and the chrome speak one colour language.
+
+### Scent field
+
+Two channels share the substrate and are blended **per cell** (`app/src/sim/palette.ts`):
+
+| Channel | Laid by | Colour |
+|---|---|---|
+| Food scent | ants returning with food | emerald `#12e880` |
+| Home scent | outbound ants marking the way back | sapphire `#2076ff` |
+| Alarm | danger pulse, 3.5× decay | crimson |
+
+Where both pass through the same cell, the weights mix into a **new hue** — turquoise drifting to
+aqua as the ratio approaches 50/50 — never a flat overlay. Brightness is the traffic itself: quiet
+ground stays dim, busy corridors climb to an incandescent core. `blendScent` is pure and
+allocation-free, and is unit-tested for hue, mixture and traffic response.
+
+### Ant intelligence
+
+Each tick an ant samples a **five-ray fan** ahead of it, weighting every ray by concentration *and*
+alignment, so the colony converges on the shortest well-travelled corridor instead of oscillating
+between equal branches; local tropotaxis then handles fine trail following. Layered near/mid/far
+whiskers begin the turn before contact, and a stuck detector scans 16 headings for the most open
+one and steps into it — an ant cannot stay pinned behind a wall. Finding food stamps a radial scent
+beacon so the return highway is unmistakable, and food scent decays at roughly half the rate of
+home scent so established highways stay legible.
 
 ---
 

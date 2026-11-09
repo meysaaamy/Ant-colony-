@@ -1,3 +1,4 @@
+import { blendScent } from './palette';
 import { SimulationEngine } from './engine';
 import { AntState, ToolType, StrokePoint } from './types';
 import { computePheromoneAlpha } from './math';
@@ -585,39 +586,12 @@ export class SimulationRenderer {
         continue;
       }
 
-      // Proportional chromatic weights
-      const invSum = 1.0 / sum;
-      const w_ft = v_ft * invSum; // Green weight
-      const w_hg = v_hg * invSum; // Blue weight
-      const w_al = v_al * invSum; // Alarm red weight
-
-      // Base chromatic components (spec accent triad):
-      // Food / amber recruitment: [255, 174, 0]
-      // Home / cyan guide:        [0, 240, 255]
-      // Alarm / crimson pulse:    [255, 10, 67]
-      // Amber + cyan in equal parts resolves to a luminous aquamarine filament.
-      const baseR = w_ft * 255 + w_hg * 0 + w_al * 255;
-      const baseG = w_ft * 174 + w_hg * 240 + w_al * 10;
-      const baseB = w_ft * 0 + w_hg * 255 + w_al * 67;
-
-      // Traffic luminance scaling:
-      // "درصد روشنایی اش هم بر اساس مقدار تردد باشه"
-      // Traffic saturation factor t in [0..1]
-      const t = Math.min(1.0, sum / 75.0);
-      
-      // Dynamic luminance: low traffic has subtle luminance, high traffic becomes incandescent
-      const luminanceFactor = 0.55 + 0.45 * Math.pow(t, 0.65);
-
-      // White-hot overexposure core for heavy traffic
-      const coreOverexposure = t > 0.65 ? (t - 0.65) * 2.85 * 200 : 0;
-
-      const r = Math.min(255, Math.floor(baseR * luminanceFactor + coreOverexposure));
-      const g = Math.min(255, Math.floor(baseG * luminanceFactor + coreOverexposure));
-      const b = Math.min(255, Math.floor(baseB * luminanceFactor + coreOverexposure));
-
-      // Alpha based on traffic and render mode
-      const q = Math.min(255, Math.floor(sum * 2.55));
-      const a = computePheromoneAlpha(q, isFog ? 'fog' : 'glow');
+      // Point-by-point chromatic blend (shared with the unit tests).
+      const c = blendScent(v_ft, v_hg, v_al, isFog);
+      const r = c.r;
+      const g = c.g;
+      const b = c.b;
+      const a = computePheromoneAlpha(Math.min(255, c.a), isFog ? 'fog' : 'glow');
 
       data[idx4] = r;
       data[idx4 + 1] = g;

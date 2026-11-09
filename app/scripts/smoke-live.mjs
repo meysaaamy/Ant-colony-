@@ -72,7 +72,7 @@ const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 let mounted = false;
 for (let i = 0; i < 100 && !mounted; i++) {
   await wait(100);
-  mounted = !!document.querySelector('.hud-top') && !!document.querySelector('.dock button.slot');
+  mounted = !!document.querySelector('.landing') || !!document.querySelector('.hud-top');
 }
 
 const checks = [];
@@ -85,6 +85,12 @@ check('React mounted', mounted);
 check('boot splash replaced', !q('.boot-text') || !q('.boot-text')?.textContent?.includes('Awakening'), q('.boot-text')?.textContent || 'gone');
 check('no boot error shown', !q('#boot-error') || getComputedStyleSafe(window, q('#boot-error')), '');
 check('canvas present', !!q('canvas'), q('canvas') ? `${q('canvas').width}x${q('canvas').height}` : 'missing');
+check('landing screen renders with headline + CTAs', !!q('.landing') && /Big wonder/.test(q('.display')?.textContent ?? '') && qa('.cta').length === 2, '');
+// enter the sandbox so the cockpit checks below exercise the game screen
+const play = q('[data-play="sandbox"]');
+play?.dispatchEvent(new window.MouseEvent('click', { bubbles: true, cancelable: true }));
+await wait(400);
+check('“Play sandbox” swaps the landing for the cockpit', !q('.landing') && !!q('.hud-top'), '');
 check('top HUD present', !!q('.hud-top'), '');
 check('bottom cockpit present', !!q('.stack') || !!q('[class*="cockpit"]'), '');
 const slots = qa('.dock button.slot');

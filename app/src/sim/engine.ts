@@ -109,7 +109,7 @@ export class SimulationEngine {
       gridHeight: this.gridHeight,
       maxPopulation: customConfig?.maxPopulation ?? 600,
       evaporationRate: customConfig?.evaporationRate ?? 0.016,
-      diffusionRate: customConfig?.diffusionRate ?? 0.12,
+      diffusionRate: customConfig?.diffusionRate ?? 0.085,
       alarmEvapMultiplier: customConfig?.alarmEvapMultiplier ?? 3.5,
       antBaseSpeed: customConfig?.antBaseSpeed ?? 2.4,
       antennaAngle: customConfig?.antennaAngle ?? 0.61, // ~35 deg
@@ -527,7 +527,10 @@ export class SimulationEngine {
     const H = this.gridHeight;
     const D = Math.min(0.24, this.config.diffusionRate); // CFL clamp
     const lambda = this.config.evaporationRate;
-    const evapFactor = Math.exp(-dt * lambda);
+    // Food highways must stay legible ("trail clearer after food is found"), while the
+    // outbound home scent is refreshed constantly and can afford to fade faster.
+    const evapFactor = Math.exp(-dt * lambda * 0.55);
+    const evapFactorHome = Math.exp(-dt * lambda * 1.35);
     const alarmEvapFactor = Math.exp(-dt * lambda * this.config.alarmEvapMultiplier);
 
     const D_center = 1.0 - 4.0 * D * 0.5;
@@ -581,7 +584,7 @@ export class SimulationEngine {
         const down_hg = walls[idxDown] === 1 ? c_hg : hg[idxDown];
 
         const lap_hg = left_hg + right_hg + up_hg + down_hg - 4.0 * c_hg;
-        const val_hg = (c_hg + lap_hg * D) * evapFactor;
+        const val_hg = (c_hg + lap_hg * D) * evapFactorHome;
         hgNext[idx] = val_hg > 0.0005 ? Math.min(100.0, val_hg) : 0;
 
         // Alarm (3.5x faster evaporation)
@@ -606,6 +609,28 @@ export class SimulationEngine {
 
     this.alarm = alNext;
     this.alarmNext = al;
+  }
+
+  /** Radial scent stamp — marks discoveries (food found) with a soft beacon. */
+  private stampScent(field: Float32Array, x: number, y: number, cells: number, amount: number) {
+    const cs = this.config.cellSize;
+    const gx = Math.floor(x / cs);
+    const gy = Math.floor(y / cs);
+    const r2 = cells * cells;
+    for (let oy = -cells; oy <= cells; oy++) {
+      const ny = gy + oy;
+      if (ny < 0 || ny >= this.gridHeight) continue;
+      for (let ox = -cells; ox <= cells; ox++) {
+        const d2 = ox * ox + oy * oy;
+        if (d2 > r2) continue;
+        const nx = gx + ox;
+        if (nx < 0 || nx >= this.gridWidth) continue;
+        const idx = ny * this.gridWidth + nx;
+        if (this.wallGrid[idx] === 1) continue;
+        const falloff = 1 - Math.sqrt(d2) / (cells + 1);
+        field[idx] = Math.min(100.0, field[idx] + amount * falloff);
+      }
+    }
   }
 
   private sampleField(field: Float32Array, x: number, y: number): number {
@@ -744,8 +769,38 @@ export class SimulationEngine {
       }
       const wander = this.wanderVelocity[i] * (this.state[i] === AntState.ALARMED ? 2.5 : 1.0);
 
-      // Calculate chemical steering torque with autocatalytic shortest-path amplification
-      let steeringDelta = computeTropotaxisSteering(sLeft, sCenter, sRight, wander, sensitivity);
+      // ── Route choice: five-ray fan ──────────────────────────────────
+      // Ants commit to the corridor that carries the most pheromone *and* lies
+      // closest to their heading, which is how a colony settles on the shortest
+      // well-travelled route instead of oscillating between equal branches.
+      let steeringDelta = 0;
+      let fanWeight = 0;
+      if (sumStimulus > 0.015) {
+        let bestScore = 0;
+        let bestOffset = 0;
+        for (let k = -2; k <= 2; k++) {
+          const rayAng = ang + k * antAngle * 0.9;
+          const reach = antDistance * 1.7;
+          const rx = px + Math.cos(rayAng) * reach;
+          const ry = py + Math.sin(rayAng) * reach;
+          if (!lineOfSight(px, py, rx, ry, isWallFn, cs)) continue;
+          const conc = weberFechner(this.sampleField(activeField, rx, ry));
+          // Alignment penalty: a branch two sectors off must be clearly stronger.
+          const score = conc / (1.0 + 0.5 * Math.abs(k));
+          if (score > bestScore) {
+            bestScore = score;
+            bestOffset = k;
+          }
+        }
+        if (bestScore > 0.02) {
+          steeringDelta += bestOffset * 0.19 * Math.min(1.6, sensitivity);
+          fanWeight = Math.min(1, bestScore * 2.2);
+        }
+      }
+
+      // Local tropotaxis for fine trail following
+      steeringDelta +=
+        computeTropotaxisSteering(sLeft, sCenter, sRight, wander, sensitivity) * (1 - 0.7 * fanWeight);
 
       // Foragers on a trail: slight outward alignment away from nest to keep them rushing towards food
       if (currentState === AntState.FORAGING && sumStimulus > 0.04) {
@@ -760,17 +815,15 @@ export class SimulationEngine {
 
       // Proactive Whisker Obstacle Avoidance:
       // Steers ants around walls and corners before impact
-      const whiskerTorque = computeWhiskerAvoidance(
-        px,
-        py,
-        ang,
-        antRadius + 11,
-        0.52,
-        isWallFn,
-        cs
-      );
-      if (whiskerTorque !== 0) {
-        steeringDelta += whiskerTorque * 0.6;
+      // Layered whiskers: near/mid/far so ants start turning early and never
+      // press into a corner ("پشت دیوارها گیر نکنند").
+      for (const [reach, spread, gain] of [
+        [antRadius + 9, 0.46, 0.55],
+        [antRadius + 17, 0.62, 0.35],
+        [antRadius + 26, 0.78, 0.2],
+      ] as [number, number, number][]) {
+        const torque = computeWhiskerAvoidance(px, py, ang, reach, spread, isWallFn, cs);
+        if (torque !== 0) steeringDelta += torque * gain;
       }
 
       // Path Integration & Dead Reckoning for RETURNING ants
@@ -833,6 +886,10 @@ export class SimulationEngine {
             cluster.currentAmount--;
             this.state[i] = AntState.RETURNING;
             ang += Math.PI; // Turn back towards nest
+
+            // Stamp a bright food-scent beacon at the source so the return
+            // trail is unambiguous for the rest of the colony.
+            this.stampScent(this.foodTrail, px, py, 5, 62);
 
             // Burst of emerald sparks
             this.emitHarvestSparks(px, py);
@@ -915,10 +972,37 @@ export class SimulationEngine {
         const movedDist = Math.hypot(px - this.lastSampleX[i], py - this.lastSampleY[i]);
         if (movedDist < 3.0) {
           this.stuckTimer[i] += dt * 12;
-          if (this.stuckTimer[i] > 0.22) {
-            // Trapped: turn around away from obstruction
-            ang += Math.PI * 0.75 + (Math.random() - 0.5) * 0.5;
+          if (this.stuckTimer[i] > 0.18) {
+            // Trapped in a corner or against a long wall: choose the most open
+            // of 16 headings (clearance-weighted) and step into it, so an ant
+            // can never remain pinned.
+            let bestAng = ang + Math.PI;
+            let bestClear = -1;
+            for (let c = 0; c < 16; c++) {
+              const a = (c / 16) * Math.PI * 2;
+              let clear = 0;
+              for (let d = 6; d <= 38; d += 8) {
+                const tx = px + Math.cos(a) * d;
+                const ty = py + Math.sin(a) * d;
+                const gx2 = Math.floor(tx / cs);
+                const gy2 = Math.floor(ty / cs);
+                if (gx2 < 0 || gx2 >= this.gridWidth || gy2 < 0 || gy2 >= this.gridHeight) break;
+                if (this.wallGrid[gy2 * this.gridWidth + gx2] === 1) break;
+                clear += d;
+              }
+              // prefer openings that loosely continue the ant's errand
+              const align = Math.cos(a - ang) * 4;
+              if (clear + align > bestClear) {
+                bestClear = clear + align;
+                bestAng = a;
+              }
+            }
+            ang = bestAng;
+            px += Math.cos(ang) * 4.5;
+            py += Math.sin(ang) * 4.5;
             this.stuckTimer[i] = 0;
+            this.lastSampleX[i] = px;
+            this.lastSampleY[i] = py;
           }
         } else {
           this.stuckTimer[i] = 0;
@@ -942,14 +1026,14 @@ export class SimulationEngine {
           const cIdx = gy * this.gridWidth + gx;
           if (this.wallGrid[cIdx] === 0) {
             const timeSince = this.simTime - this.lastVisitGrid[cIdx];
-            const baseStr = isReturning ? 34.0 : 12.0;
+            const baseStr = isReturning ? 58.0 : 17.0;
             const depAmount = saturatingDeposition(baseStr, timeSince, 0.06, depField[cIdx]);
             depField[cIdx] = Math.min(100.0, depField[cIdx] + depAmount);
             this.lastVisitGrid[cIdx] = this.simTime;
 
             // Multi-cell footprint for bold luminous returning highways
             if (isReturning) {
-              const nStr = baseStr * 0.45;
+              const nStr = baseStr * 0.52;
               const offsets = [-1, 1];
               for (const ox of offsets) {
                 const ngx = gx + ox;

@@ -89,6 +89,44 @@ const check = (name, fn) => {
   catch (e) { results.push(`✗ ${name} — ${e.message}`); errors.push(name); }
 };
 
+/* ── landing screen ───────────────────────────────────────────────────── */
+check('landing screen is the first thing you see', () => assert.ok(q('.landing')));
+check('serif display headline reads “Small world. Big wonder.”', () => {
+  assert.match(q('.display')?.textContent ?? '', /Small world\./);
+  assert.match(q('.display')?.textContent ?? '', /Big wonder\./);
+});
+check('two launch CTAs (sandbox + 180-second challenge)', () => {
+  assert.equal(qa('.cta').length, 2);
+  assert.ok(q('[data-play="sandbox"]'));
+  assert.ok(q('[data-play="challenge"]'));
+});
+check('three starting worlds, exactly one selected', () => {
+  assert.equal(qa('.world-card').length, 3);
+  assert.equal(qa('.world-card.is-selected').length, 1);
+});
+check('world cards carry bespoke SVG previews, no bitmaps', () => {
+  for (const card of qa('.world-card')) assert.ok(card.querySelector('svg.world-thumb'));
+  assert.equal(qa('.landing img').length, 0);
+});
+check('landing shows no emoji', () =>
+  assert.doesNotMatch(q('.landing')?.textContent ?? '', /[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/u));
+
+const worldCards = qa('.world-card');
+click(worldCards[1]);
+await wait(80);
+check('tapping a world moves the selection', () => {
+  assert.ok(qa('.world-card')[1].classList.contains('is-selected'));
+  assert.equal(qa('.world-card.is-selected').length, 1);
+});
+
+click(q('[data-play="sandbox"]'));
+await wait(150);
+check('“Play sandbox” opens the cockpit and dismisses the landing', () => {
+  assert.equal(q('.landing'), null);
+  assert.ok(q('.hud-top'));
+  assert.ok(q('.dock'));
+});
+
 /* ── structure ─────────────────────────────────────────────────────────── */
 check('6 bespoke tool slots render', () => assert.equal(qa('.slot').length, 6));
 check('every slot ships an inline SVG glyph (no emoji)', () => {
