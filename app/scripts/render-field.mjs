@@ -13,9 +13,11 @@ const outfile = join(dir,'b.mjs');
 await build({entryPoints:[entry],bundle:true,format:'esm',platform:'neutral',outfile,logLevel:'silent'});
 const { SimulationEngine, blendScent, scentAura } = await import(outfile);
 
+const preset = process.argv[3] || 'double_bridge';
+const seconds = Number(process.argv[4] || 60);
 const E = new SimulationEngine({ worldWidth: 795, worldHeight: 1720, maxPopulation: 600, brushRadius: 31 });
-E.loadPreset('double_bridge');
-for (let s=0;s<3600;s++) E.step(1/60);
+E.loadPreset(preset);
+for (let s = 0; s < Math.round(seconds * 60); s++) E.step(1/60);
 
 const W = E.gridWidth, H = E.gridHeight, S = 3; // supersample
 const px = Buffer.alloc((W*S)*(H*S)*3);

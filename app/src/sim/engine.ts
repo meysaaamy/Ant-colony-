@@ -80,6 +80,20 @@ export class SimulationEngine {
   public lastSampleY: Float32Array;
   /** 0 = free, +1 = contouring with wall on the left, -1 = on the right. */
   public wallMode: Int8Array;
+
+  /**
+   * Loop / eddy breaker. Milling is the one failure mode a pure pheromone
+   * follower cannot escape: if a trail closes on itself, every ant on it keeps
+   * the loop alive and the loop keeps every ant on it. So each ant carries a
+   * patience clock that only resets when it makes real progress toward its
+   * errand (outward from the nest while foraging, inward while carrying). When
+   * the clock runs out the ant snaps its heading and ignores scent for a
+   * moment — which is what starves a loop of traffic so it can evaporate.
+   */
+  public patience: Float32Array;
+  public progressRef: Float32Array;
+  private lastErrandState: Int8Array;
+  public breakout: Float32Array;
   public wallCooldown: Float32Array;
   /** Distance travelled on the current leg (nest→food or food→nest). */
   public pathLen: Float32Array;
@@ -182,6 +196,10 @@ export class SimulationEngine {
     this.lastSampleX = new Float32Array(this.MAX_AGENTS);
     this.lastSampleY = new Float32Array(this.MAX_AGENTS);
     this.wallMode = new Int8Array(this.MAX_AGENTS);
+    this.patience = new Float32Array(this.MAX_AGENTS);
+    this.progressRef = new Float32Array(this.MAX_AGENTS);
+    this.lastErrandState = new Int8Array(this.MAX_AGENTS);
+    this.breakout = new Float32Array(this.MAX_AGENTS);
     this.wallCooldown = new Float32Array(this.MAX_AGENTS);
     this.pathLen = new Float32Array(this.MAX_AGENTS);
     this.prevX = new Float32Array(this.MAX_AGENTS);
@@ -250,6 +268,10 @@ export class SimulationEngine {
     this.alarmTimer[idx] = 0;
     this.antennationTimer[idx] = 0;
     this.wanderVelocity[idx] = 0;
+    this.patience[idx] = 0;
+    this.progressRef[idx] = 0;
+    this.lastErrandState[idx] = this.state[idx];
+    this.breakout[idx] = 0;
     this.stuckTimer[idx] = 0;
     this.lastSampleX[idx] = x;
     this.lastSampleY[idx] = y;
@@ -884,14 +906,61 @@ export class SimulationEngine {
         activeField = this.homeGuide;
       }
 
+      // ── Patience clock (loop breaker) ───────────────────────────────
+      // Reset only on genuine progress toward the errand; an ant going round a
+      // closed trail makes none, so its clock runs out and it breaks away.
+      if (this.lastErrandState[i] !== currentState) {
+        this.lastErrandState[i] = currentState;
+        this.patience[i] = 0;
+        this.progressRef[i] = Math.hypot(px - nestX, py - nestY);
+        this.breakout[i] = 0;
+      }
+      const distNest = Math.hypot(px - nestX, py - nestY);
+      if (currentState === AntState.RETURNING) {
+        if (distNest < this.progressRef[i] - 22) {
+          this.progressRef[i] = distNest;
+          this.patience[i] = 0;
+        } else {
+          this.patience[i] += dt;
+        }
+      } else if (distNest > this.progressRef[i] + 22) {
+        this.progressRef[i] = distNest;
+        this.patience[i] = 0;
+      } else {
+        this.patience[i] += dt;
+      }
+
+      if (this.breakout[i] > 0) {
+        this.breakout[i] -= dt;
+        if (this.breakout[i] <= 0) {
+          this.breakout[i] = 0;
+          this.patience[i] = 0;
+          this.progressRef[i] = distNest;
+        }
+      } else if (this.patience[i] > 5.5) {
+        // Round and round with nothing gained: snap the heading and walk.
+        this.breakout[i] = 1.3;
+        this.patience[i] = 0;
+        this.progressRef[i] = distNest;
+        if (currentState === AntState.RETURNING) {
+          ang = Math.atan2(nestY - py, nestX - px) + (Math.random() - 0.5) * 1.2;
+        } else {
+          ang = Math.atan2(py - nestY, px - nestX) + (Math.random() - 0.5) * 1.8;
+        }
+      }
+
+      // A breaking ant stops believing the scent for a moment, otherwise it is
+      // pulled straight back onto the same loop.
+      const antTrust = this.breakout[i] > 0 ? trailTrust * 0.12 : trailTrust;
+
       const rawL = losL ? this.sampleField(activeField, sensors.lx, sensors.ly) : 0;
       const rawC = losC ? this.sampleField(activeField, sensors.cx, sensors.cy) : 0;
       const rawR = losR ? this.sampleField(activeField, sensors.rx, sensors.ry) : 0;
 
       // Weber-Fechner sensory response S = ln(1 + C)
-      const sLeft = weberFechner(rawL) * trailTrust;
-      const sCenter = weberFechner(rawC) * trailTrust;
-      const sRight = weberFechner(rawR) * trailTrust;
+      const sLeft = weberFechner(rawL) * antTrust;
+      const sCenter = weberFechner(rawC) * antTrust;
+      const sRight = weberFechner(rawR) * antTrust;
       const sumStimulus = sLeft + sCenter + sRight;
 
       let steeringDelta = 0;
@@ -931,7 +1000,12 @@ export class SimulationEngine {
       } else {
         this.wanderVelocity[i] *= 0.6;
       }
-      const wander = this.wanderVelocity[i] * (this.state[i] === AntState.ALARMED ? 2.5 : 1.0);
+      const wander =
+        this.wanderVelocity[i] *
+        (this.state[i] === AntState.ALARMED ? 2.5 : 1.0) *
+        // While breaking out of a loop the ant should commit to a direction
+        // rather than dither at the first hint of scent.
+        (this.breakout[i] > 0 ? 0.25 : 1.0);
 
       // ── Route choice: five-ray fan ──────────────────────────────────
       // Ants commit to the corridor that carries the most pheromone *and* lies
@@ -947,7 +1021,7 @@ export class SimulationEngine {
           const rx = px + Math.cos(rayAng) * reach;
           const ry = py + Math.sin(rayAng) * reach;
           if (!lineOfSight(px, py, rx, ry, isWallFn, cs)) continue;
-          const conc = weberFechner(this.sampleField(activeField, rx, ry)) * trailTrust;
+          const conc = weberFechner(this.sampleField(activeField, rx, ry)) * antTrust;
           // Alignment penalty: a branch two sectors off must be clearly stronger.
           const score = conc / (1.0 + 0.5 * Math.abs(k));
           if (score > bestScore) {

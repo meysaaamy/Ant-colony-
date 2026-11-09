@@ -299,6 +299,46 @@ const spreadOf = (E) => {
   });
 }
 
+/* ── 2c. no circular milling: ants must not be trapped by a closed trail ── */
+{
+  // A circular trail kept artificially alive — the classic "ants go round in
+  // circles" failure, which a pure pheromone follower can never escape.
+  const mill = new SimulationEngine({ worldWidth: 700, worldHeight: 900, maxPopulation: 140 });
+  mill.loadPreset('sanctuary');
+  mill.clearPheromones();
+  mill.foodClusters.length = 0; // nothing to find: the loop is the only cue
+  const cx = 350;
+  const cy = 450;
+  const R = 130;
+  mill.activeCount = 0;
+  for (let k = 0; k < 120; k++) {
+    const a = Math.random() * Math.PI * 2;
+    mill.spawnAnt(cx + Math.cos(a) * R, cy + Math.sin(a) * R, a + Math.PI / 2);
+  }
+  const offRing = () => {
+    let escaped = 0;
+    for (let i = 0; i < mill.activeCount; i++) {
+      if (Math.abs(Math.hypot(mill.x[i] - cx, mill.y[i] - cy) - R) > 60) escaped++;
+    }
+    return escaped / Math.max(1, mill.activeCount);
+  };
+
+  let peakEscaped = 0;
+  for (let step = 1; step <= 1080; step++) {
+    if (step % 10 === 0) {
+      for (let a = 0; a < Math.PI * 2; a += 0.014) {
+        mill.depositPheromone(mill.foodTrail, cx + Math.cos(a) * R, cy + Math.sin(a) * R, 9, 80);
+      }
+    }
+    mill.step(1 / 60);
+    if (step > 600) peakEscaped = Math.max(peakEscaped, offRing());
+  }
+
+  check('ants break out of a circular trail instead of milling forever', () => {
+    assert.ok(peakEscaped > 0.5, `only ${(peakEscaped * 100).toFixed(0)}% ever left the ring`);
+  });
+}
+
 /* ── 3. shortest-route convergence on the double bridge ────────────────── */
 const bridgeWorld = new SimulationEngine({ worldWidth: 700, worldHeight: 900, maxPopulation: 260 });
 bridgeWorld.loadPreset('double_bridge');

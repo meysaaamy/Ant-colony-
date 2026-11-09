@@ -22,7 +22,7 @@ no network, no AI service calls.
 |---|---|
 | **File** | `dist/Ant-Colony-Scent-Painting.apk` |
 | **Package** | `com.app.antcolony` |
-| **Version** | 1.3.0 (versionCode 5) |
+| **Version** | 1.3.1 (versionCode 6) |
 | **Min / target SDK** | **21** / 34 — installs on Android 5.0+ |
 | **Signature** | **v1 (JAR) + v2** APK Signature Scheme, zip-aligned |
 | **Permissions** | *none* — fully offline, no INTERNET permission |
@@ -120,6 +120,14 @@ beacon so the return highway is unmistakable, and food scent decays at roughly h
 home scent so established highways stay legible. On the Double Bridge preset the two bores carry
 identical nests and food: within the first minute the colony funnels through the short bore at
 roughly **1.5–1.9×** the traffic of the long loop, and stays there.
+
+**No milling.** A pure pheromone follower cannot escape a trail that closes on itself: the loop keeps
+every ant on it, and every ant on it keeps the loop alive. Each ant therefore carries a *patience*
+clock that only resets on real progress toward its errand — outward from the nest while foraging,
+inward while carrying. After 5.5 s without progress it snaps its heading, distrusts scent for 1.3 s
+and walks out. Against a circular trail held open artificially, 97 % of a colony stayed on the ring
+forever before this existed; now 86 % have left within 15 s and a loop painted once is empty inside
+12 s. Covered by `scripts/test-sim.mjs`.
 
 **An empty larder breaks the habit.** A `famine` signal ramps from 0 to 1 as the standing
 nutrients in the vaults fall below `FEAST_LEVEL`. While it is high the colony stops trusting its own
