@@ -190,27 +190,95 @@ check('most ants are foraging or returning (no permanent alarm lock)', () => {
   assert.ok(valid / engine.activeCount > 0.9, `${valid}/${engine.activeCount} in a working state`);
 });
 
+/* ── 2b. scent fades where nothing walks ───────────────────────────────── */
+{
+  const fadeEng = new SimulationEngine({ worldWidth: 600, worldHeight: 900, maxPopulation: 1 });
+  // Paint a patch far from every ant, then never reinforce it.
+  const px0 = fadeEng.config.worldWidth - 40;
+  const py0 = fadeEng.config.worldHeight - 40;
+  fadeEng.depositPheromone(fadeEng.foodTrail, px0, py0, 26, 95);
+  const cs2 = fadeEng.config.cellSize;
+  const cell = (x, y) => Math.floor(y / cs2) * fadeEng.gridWidth + Math.floor(x / cs2);
+  const cIdx = cell(px0, py0);
+  const painted = fadeEng.foodTrail[cIdx];
+
+  for (let step = 0; step < 600; step++) fadeEng.step(1 / 60); // 10 s
+  const afterPaint = fadeEng.foodTrail[cIdx];
+
+  check('unwalked scent fades away on its own', () => {
+    assert.ok(painted > 20, `paint did not land (${painted.toFixed(1)})`);
+    assert.ok(afterPaint < painted * 0.35, `still ${afterPaint.toFixed(1)} of ${painted.toFixed(1)}`);
+  });
+
+  // A corridor the ants actually use must survive longer than the untouched patch.
+  let walked = 0;
+  let walkedCount = 0;
+  let idle = 0;
+  let idleCount = 0;
+  for (let i = 0; i < fadeEng.totalCells; i++) {
+    if (fadeEng.wallGrid[i] === 1) continue;
+    if (fadeEng.traffic[i] > 1.2) {
+      walked += fadeEng.foodTrail[i] + fadeEng.homeGuide[i];
+      walkedCount++;
+    } else if (fadeEng.traffic[i] === 0) {
+      idle += fadeEng.foodTrail[i] + fadeEng.homeGuide[i];
+      idleCount++;
+    }
+  }
+  check('traffic keeps a corridor alive; idle ground stays clean', () => {
+    const walkedAvg = walkedCount ? walked / walkedCount : 0;
+    const idleAvg = idleCount ? idle / idleCount : 0;
+    assert.ok(walkedAvg > idleAvg * 2, `walked=${walkedAvg.toFixed(2)} idle=${idleAvg.toFixed(2)}`);
+  });
+}
+
 /* ── 3. shortest-route convergence on the double bridge ────────────────── */
 const bridgeWorld = new SimulationEngine({ worldWidth: 700, worldHeight: 900, maxPopulation: 260 });
 bridgeWorld.loadPreset('double_bridge');
-for (let step = 0; step < 10_800; step++) bridgeWorld.step(1 / 60); // 3 simulated minutes
 
-const bandScent = (yFromFrac, yToFrac) => {
+// Accumulate who used which bridge over the first minute (before the food runs out).
+const bandSum = (y0, y1, field) => {
   const W = bridgeWorld.gridWidth;
   const H = bridgeWorld.gridHeight;
   let sum = 0;
-  for (let gy = Math.floor(H * yFromFrac); gy < Math.floor(H * yToFrac); gy++) {
+  for (let gy = Math.floor(H * y0); gy < Math.floor(H * y1); gy++) {
     for (let gx = Math.floor(W * 0.3); gx < Math.floor(W * 0.7); gx++) {
-      sum += bridgeWorld.foodTrail[gy * W + gx];
+      sum += field[gy * W + gx];
     }
   }
   return sum;
 };
-const shortBridge = bandScent(0.28, 0.42);
-const longBridge = bandScent(0.6, 0.82);
+// Count real crossings of the barrier's midline, classified by branch. This is
+// area-independent: a wide or narrow tunnel can't inflate its own share.
+let shortUse = 0;
+let longUse = 0;
+const W0 = bridgeWorld.config.worldWidth;
+const H0 = bridgeWorld.config.worldHeight;
+const lastSide = new Int8Array(4096);
+for (let step = 0; step < 3600; step++) {
+  bridgeWorld.step(1 / 60);
+  for (let i = 0; i < bridgeWorld.activeCount; i++) {
+    const ax = bridgeWorld.x[i];
+    const ay = bridgeWorld.y[i];
+    const side = ax > W0 * 0.5 ? 1 : -1;
+    if (lastSide[i] === -1 && side === 1) {
+      if (Math.abs(ay - H0 * 0.5) < H0 * 0.1) shortUse++;
+      else if (ay > H0 * 0.62) longUse++;
+    }
+    lastSide[i] = side;
+  }
+}
+
+const shortBridge = bandSum(0.44, 0.56, bridgeWorld.foodTrail);
+const longBridge = bandSum(0.62, 0.86, bridgeWorld.foodTrail);
 
 check('colony converges on the short bridge (traffic-weighted shortest path)', () => {
-  assert.ok(shortBridge > longBridge, `short=${shortBridge.toFixed(0)} long=${longBridge.toFixed(0)}`);
+  assert.ok(
+    shortUse > longUse * 1.2,
+    `ants used short=${shortUse.toFixed(0)} vs long=${longUse.toFixed(0)}`
+  );
+  assert.ok(shortUse > 300, `too few crossings to judge: ${shortUse}`);
+  assert.ok(shortBridge >= longBridge, `scent short=${shortBridge.toFixed(0)} long=${longBridge.toFixed(0)}`);
 });
 
 /* ── 4. no stalling anywhere, including concave pockets ────────────────── */

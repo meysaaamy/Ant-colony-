@@ -43,6 +43,16 @@ export class SimulationEngine {
 
   // Last visit timestamp per cell for age-attenuation (Float32Array)
   public lastVisitGrid: Float32Array;
+
+  /**
+   * Recent ant traffic per cell. Pheromone survives only while ants keep
+   * walking over it: busy cells evaporate slowly, abandoned ones fade fast.
+   */
+  public traffic: Float32Array;
+
+  /** Per-frame evaporation factors bucketed by local traffic. */
+  private evapFoodLut = new Float32Array(16);
+  private evapHomeLut = new Float32Array(16);
   public simTime: number = 0;
 
   // Structure of Arrays (SoA) for up to 3,000 ants
@@ -116,7 +126,7 @@ export class SimulationEngine {
       gridWidth: this.gridWidth,
       gridHeight: this.gridHeight,
       maxPopulation: customConfig?.maxPopulation ?? 600,
-      evaporationRate: customConfig?.evaporationRate ?? 0.016,
+      evaporationRate: customConfig?.evaporationRate ?? 0.05,
       diffusionRate: customConfig?.diffusionRate ?? 0.085,
       alarmEvapMultiplier: customConfig?.alarmEvapMultiplier ?? 3.5,
       antBaseSpeed: customConfig?.antBaseSpeed ?? 2.4,
@@ -142,6 +152,7 @@ export class SimulationEngine {
 
     this.wallGrid = new Uint8Array(this.totalCells);
     this.lastVisitGrid = new Float32Array(this.totalCells);
+    this.traffic = new Float32Array(this.totalCells);
 
     // Preallocate SoA agent arrays
     this.x = new Float32Array(this.MAX_AGENTS);
@@ -238,6 +249,7 @@ export class SimulationEngine {
   }
 
   public clearPheromones() {
+    this.traffic.fill(0);
     this.foodTrail.fill(0);
     this.foodTrailNext.fill(0);
     this.homeGuide.fill(0);
@@ -342,18 +354,18 @@ export class SimulationEngine {
       const endX = midX + barrierWidth * 0.5;
 
       // Build obstacle block in the middle
-      this.paintWallBox(startX, H * 0.18, endX, H * 0.82);
+      // Full-height barrier: the two bridges are the only ways through.
+      this.paintWallBox(startX, H * 0.02, endX, H * 0.98);
 
-      // Carve Short Branch (upper bridge, gentle angle, length L)
-      this.carveTunnel(this.nest.x + 40, H * 0.5, startX + 60, H * 0.34, 34);
-      this.carveTunnel(startX + 60, H * 0.34, endX - 60, H * 0.34, 34);
-      this.carveTunnel(endX - 60, H * 0.34, this.foodClusters[0].x - 40, H * 0.5, 34);
+      // Short branch: a straight bore through the barrier on the direct
+      // nest→food line (length L). Wide enough that ants can run it without
+      // fighting the wall sensors the whole way.
+      this.carveTunnel(this.nest.x + 30, H * 0.5, this.foodClusters[0].x - 30, H * 0.5, 44);
 
-      // Carve Long Branch (lower bridge, wide detour loop, length ~2L)
-      this.carveTunnel(this.nest.x + 40, H * 0.5, startX + 40, H * 0.64, 34);
-      this.carveTunnel(startX + 40, H * 0.64, midX, H * 0.74, 34);
-      this.carveTunnel(midX, H * 0.74, endX - 40, H * 0.64, 34);
-      this.carveTunnel(endX - 40, H * 0.64, this.foodClusters[0].x - 40, H * 0.5, 34);
+      // Long branch: the same two endpoints reached by a deep lower loop (~2 L)
+      this.carveTunnel(this.nest.x + 30, H * 0.5, startX + 20, H * 0.8, 34);
+      this.carveTunnel(startX + 20, H * 0.8, endX - 20, H * 0.8, 34);
+      this.carveTunnel(endX - 20, H * 0.8, this.foodClusters[0].x - 30, H * 0.5, 34);
 
       // Spawn starter colony
       const initialPop = Math.min(this.config.maxPopulation, 220);
@@ -506,12 +518,23 @@ export class SimulationEngine {
     // 4. Update Agents
     this.updateAgents(dt);
 
-    // 5. Update Food Clusters
+    // 5. Trail memory decays: a corridor nobody walks stops being reinforced
+    const trafficDecay = Math.exp(-dt * 0.55);
+    const trafficArr = this.traffic;
+    for (let i = 0; i < this.totalCells; i++) {
+      if (trafficArr[i] > 0.001) {
+        trafficArr[i] *= trafficDecay;
+      } else if (trafficArr[i] !== 0) {
+        trafficArr[i] = 0;
+      }
+    }
+
+    // 6. Update Food Clusters
     for (let i = 0; i < this.foodClusters.length; i++) {
       this.foodClusters[i].pulsePhase += dt * 1.2;
     }
 
-    // 6. Update Sparks & Motes
+    // 7. Update Sparks & Motes
     this.updateParticles(dt);
   }
 
@@ -540,10 +563,20 @@ export class SimulationEngine {
     const H = this.gridHeight;
     const D = Math.min(0.24, this.config.diffusionRate); // CFL clamp
     const lambda = this.config.evaporationRate;
-    // Food highways must stay legible ("trail clearer after food is found"), while the
-    // outbound home scent is refreshed constantly and can afford to fade faster.
-    const evapFactor = Math.exp(-dt * lambda * 0.55);
-    const evapFactorHome = Math.exp(-dt * lambda * 1.35);
+    // Evaporation is traffic-dependent: a cell nobody walks across loses its
+    // scent quickly ("trail fades when there is no movement"), while a corridor
+    // with ants on it is refreshed and lingers. Precomputed per bucket so the
+    // inner loop stays allocation- and exp-free.
+    const EVAP_BUCKETS = 16;
+    const evapFood = this.evapFoodLut;
+    const evapHome = this.evapHomeLut;
+    for (let b = 0; b < EVAP_BUCKETS; b++) {
+      const trafficLevel = b / (EVAP_BUCKETS - 1); // 0 → 1 (busy)
+      const staleness = 1 - trafficLevel;
+      evapFood[b] = Math.exp(-dt * lambda * (0.5 + 2.2 * staleness));
+      evapHome[b] = Math.exp(-dt * lambda * (0.8 + 2.6 * staleness));
+    }
+    const trafficField = this.traffic;
     const alarmEvapFactor = Math.exp(-dt * lambda * this.config.alarmEvapMultiplier);
 
     const D_center = 1.0 - 4.0 * D * 0.5;
@@ -585,9 +618,13 @@ export class SimulationEngine {
         const up_ft = walls[idxUp] === 1 ? c_ft : ft[idxUp];
         const down_ft = walls[idxDown] === 1 ? c_ft : ft[idxDown];
 
+        const bucket = Math.min(
+          EVAP_BUCKETS - 1,
+          Math.max(0, Math.round((trafficField[idx] / 6) * (EVAP_BUCKETS - 1)))
+        );
         const lap_ft = left_ft + right_ft + up_ft + down_ft - 4.0 * c_ft;
-        const val_ft = (c_ft + lap_ft * D) * evapFactor;
-        ftNext[idx] = val_ft > 0.0005 ? Math.min(100.0, val_ft) : 0;
+        const val_ft = (c_ft + lap_ft * D) * evapFood[bucket];
+        ftNext[idx] = val_ft > 0.35 ? Math.min(100.0, val_ft) : 0;
 
         // Home Guide
         const c_hg = hg[idx];
@@ -597,8 +634,8 @@ export class SimulationEngine {
         const down_hg = walls[idxDown] === 1 ? c_hg : hg[idxDown];
 
         const lap_hg = left_hg + right_hg + up_hg + down_hg - 4.0 * c_hg;
-        const val_hg = (c_hg + lap_hg * D) * evapFactorHome;
-        hgNext[idx] = val_hg > 0.0005 ? Math.min(100.0, val_hg) : 0;
+        const val_hg = (c_hg + lap_hg * D) * evapHome[bucket];
+        hgNext[idx] = val_hg > 0.35 ? Math.min(100.0, val_hg) : 0;
 
         // Alarm (3.5x faster evaporation)
         const c_al = al[idx];
@@ -625,7 +662,16 @@ export class SimulationEngine {
   }
 
   /** Stamp one sample of a trail, including a narrow cross-trail footprint. */
-  private depositScent(field: Float32Array, x: number, y: number, baseStr: number, wide: boolean) {
+  private depositScent(
+    field: Float32Array,
+    x: number,
+    y: number,
+    baseStr: number,
+    wide: boolean,
+    // Route vigour: short, efficient legs count as real traffic; long detours
+    // barely keep their cells alive, so unused branches fade first.
+    vigour = 1
+  ) {
     const cs = this.config.cellSize;
     const gx = Math.floor(x / cs);
     const gy = Math.floor(y / cs);
@@ -638,6 +684,9 @@ export class SimulationEngine {
     const amount = saturatingDeposition(baseStr, timeSince, 0.06, field[cIdx]);
     field[cIdx] = Math.min(100.0, field[cIdx] + amount);
     this.lastVisitGrid[cIdx] = this.simTime;
+    // Walking a corridor is what keeps it alive — in proportion to how
+    // directly this leg served the errand.
+    this.traffic[cIdx] = Math.min(8.0, this.traffic[cIdx] + 1.4 * vigour);
 
     if (!wide) return;
 
@@ -650,6 +699,7 @@ export class SimulationEngine {
       const nIdx = ngy * this.gridWidth + ngx;
       if (this.wallGrid[nIdx] === 1) continue;
       field[nIdx] = Math.min(100.0, field[nIdx] + spill * 0.28);
+      this.traffic[nIdx] = Math.min(8.0, this.traffic[nIdx] + 0.55 * vigour);
     }
   }
 
@@ -1160,6 +1210,7 @@ export class SimulationEngine {
 
         const depField = isReturning ? this.foodTrail : this.homeGuide;
         const efficiency = 1 / (1 + this.pathLen[i] / 900); // 1 → strong, decays with distance
+        const vigour = 0.18 + 0.82 * efficiency;
         const baseStr = (isReturning ? 62.0 : 20.0) * (0.55 + 0.45 * efficiency);
 
         const steps = Math.max(
@@ -1172,7 +1223,7 @@ export class SimulationEngine {
           const t = sIdx / steps;
           const sx = this.prevX[i] + (px - this.prevX[i]) * t;
           const sy = this.prevY[i] + (py - this.prevY[i]) * t;
-          this.depositScent(depField, sx, sy, baseStr, isReturning);
+          this.depositScent(depField, sx, sy, baseStr, isReturning, vigour);
         }
 
         // Bright micro-sparkles riding the returning highways

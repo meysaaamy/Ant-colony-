@@ -116,7 +116,16 @@ between equal branches; local tropotaxis then handles fine trail following. Laye
 whiskers begin the turn before contact, and a stuck detector scans 16 headings for the most open
 one and steps into it — an ant cannot stay pinned behind a wall. Finding food stamps a radial scent
 beacon so the return highway is unmistakable, and food scent decays at roughly half the rate of
-home scent so established highways stay legible.
+home scent so established highways stay legible. On the Double Bridge preset the two bores carry
+identical nests and food: within the first minute the colony funnels through the short bore at
+roughly **1.5–1.9×** the traffic of the long loop, and stays there.
+
+**Scent only lives where ants walk.** Every deposit also stamps a per-cell *traffic* counter — a
+deposit's vigour is weighted by how directly its leg served the errand, so a long detour barely
+registers. Evaporation reads that counter through a 16-bucket table: idle ground evaporates at
+2–3× the rate of a walked corridor, so an abandoned trail fades out in tens of seconds while the
+route the colony is actually using stays bright. There is no global "clear" pass — the trails are
+erased by the colony's own footsteps and by neglect.
 
 ---
 
