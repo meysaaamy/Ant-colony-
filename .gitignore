@@ -1,0 +1,17 @@
+# dependencies & generated bundles
+node_modules/
+app/node_modules/
+app/www/
+android/assets/www/
+
+# build intermediates
+build/
+*.log
+
+# provisioned toolchain (see tools/fetch-toolchain.sh)
+tools/vendor/
+.cache/
+
+# python
+__pycache__/
+*.pyc
