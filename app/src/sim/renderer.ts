@@ -843,6 +843,22 @@ export class SimulationRenderer {
       ctx.translate(xs[i], ys[i]);
       ctx.scale(this.ANT_DRAW_SCALE, this.ANT_DRAW_SCALE);
 
+      // Reward flash: a warm bloom on an ant that just banked a payoff (food
+      // delivered, a new vault found, a lesson learned). This is the only place
+      // the learning is visible — no labels, just satisfaction.
+      const flash = engine.rewardFlash[i];
+      if (flash > 0.02) {
+        const r = 10 + 8 * flash;
+        const grad = ctx.createRadialGradient(0, 0, 0, 0, 0, r);
+        grad.addColorStop(0, `rgba(255, 226, 160, ${0.5 * flash})`);
+        grad.addColorStop(0.55, `rgba(255, 190, 96, ${0.22 * flash})`);
+        grad.addColorStop(1, 'rgba(255, 176, 74, 0)');
+        ctx.fillStyle = grad;
+        ctx.beginPath();
+        ctx.arc(0, 0, r, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
       // Radiant underglow halo for returning and alarmed ants
       if (state === 1) {
         // Returning food carrier: glowing emerald-cyan aura

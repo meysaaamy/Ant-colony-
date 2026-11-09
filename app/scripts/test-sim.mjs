@@ -217,7 +217,7 @@ check('most ants are foraging or returning (no permanent alarm lock)', () => {
   let idleCount = 0;
   for (let i = 0; i < fadeEng.totalCells; i++) {
     if (fadeEng.wallGrid[i] === 1) continue;
-    if (fadeEng.traffic[i] > 1.2) {
+    if (fadeEng.traffic[i] > 0.5) {
       walked += fadeEng.foodTrail[i] + fadeEng.homeGuide[i];
       walkedCount++;
     } else if (fadeEng.traffic[i] === 0) {
@@ -336,6 +336,75 @@ const spreadOf = (E) => {
 
   check('ants break out of a circular trail instead of milling forever', () => {
     assert.ok(peakEscaped > 0.5, `only ${(peakEscaped * 100).toFixed(0)}% ever left the ring`);
+  });
+}
+
+/* ── 2d. reward, penalty and generational evolution ─────────────────────── */
+{
+  const evo = new SimulationEngine({ worldWidth: 760, worldHeight: 980, maxPopulation: 280 });
+  evo.loadPreset('double_bridge');
+  const genes = () => {
+    const n = Math.max(1, evo.activeCount);
+    const g = [0, 0, 0, 0, 0];
+    for (let i = 0; i < evo.activeCount; i++) for (let k = 0; k < 5; k++) g[k] += evo.genome[i * 5 + k];
+    return g.map((v) => v / n);
+  };
+  const startGenes = genes();
+
+  for (let step = 0; step < 5400; step++) evo.step(1 / 60); // 90 s
+
+  check('the colony earns a Hall of Fame and breeds later generations', () => {
+    assert.ok(evo.eliteCount === 12, `eliteCount=${evo.eliteCount}`);
+    assert.ok(evo.colonyGeneration >= 2, `generation stuck at ${evo.colonyGeneration}`);
+    assert.ok(evo.bestFitness > 200, `best fitness ${evo.bestFitness.toFixed(0)}`);
+    assert.ok(evo.colonyBrainDistance > 0.01, `brains still neutral (${evo.colonyBrainDistance.toFixed(3)})`);
+  });
+
+  check('learning is balanced: no gene runs to its rail', () => {
+    const mid = genes();
+    for (let k = 0; k < 5; k++) {
+      assert.ok(mid[k] > 0.5 && mid[k] < 1.85, `gene ${k} = ${mid[k].toFixed(2)}`);
+    }
+    assert.ok(evo.learnedEvents > 300, `only ${evo.learnedEvents} lessons`);
+  });
+
+  check('wall contact teaches foresight', () => {
+    // Scraping is the most common mistake; the colony should end up with a
+    // wider clearance margin than the generation-1 baseline.
+    assert.ok(genes()[2] > startGenes[2], `foresight ${genes()[2].toFixed(3)} vs ${startGenes[2].toFixed(3)}`);
+    assert.ok(evo.penaltyEvents > 100, `only ${evo.penaltyEvents} penalties`);
+  });
+}
+
+{
+  // ── False trail: a vault that is empty but still smells ────────────────
+  const dead = new SimulationEngine({ worldWidth: 700, worldHeight: 900, maxPopulation: 120 });
+  dead.loadPreset('sanctuary');
+  dead.clearPheromones();
+  dead.foodClusters.length = 0;
+  dead.addFoodCluster(350, 300);
+  dead.foodClusters[0].currentAmount = 0; // harvested to nothing, still on the map
+  // A strong corridor leading to the dead vault
+  for (let y = 320; y < 760; y += 6) {
+    dead.depositPheromone(dead.foodTrail, 350, y, 26, 95);
+  }
+  const trailBefore = (() => {
+    let sum = 0;
+    for (let i = 0; i < dead.totalCells; i++) sum += dead.foodTrail[i];
+    return sum;
+  })();
+  dead.activeCount = 0;
+  for (let k = 0; k < 70; k++) dead.spawnAnt(350 + (Math.random() - 0.5) * 40, 600 + Math.random() * 200, -Math.PI / 2);
+  for (let step = 0; step < 720; step++) dead.step(1 / 60); // 12 s
+  const trailAfter = (() => {
+    let sum = 0;
+    for (let i = 0; i < dead.totalCells; i++) sum += dead.foodTrail[i];
+    return sum;
+  })();
+
+  check('a dead route is confirmed, penalised and actively scrubbed', () => {
+    assert.ok(dead.dampingEvents > 0, 'no ant entered trail-damping mode');
+    assert.ok(trailAfter < trailBefore * 0.6, `trail kept ${(100 * trailAfter / trailBefore).toFixed(0)}%`);
   });
 }
 

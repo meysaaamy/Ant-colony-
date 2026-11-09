@@ -22,7 +22,7 @@ no network, no AI service calls.
 |---|---|
 | **File** | `dist/Ant-Colony-Scent-Painting.apk` |
 | **Package** | `com.app.antcolony` |
-| **Version** | 1.3.2 (versionCode 7) |
+| **Version** | 1.4.0 (versionCode 8) |
 | **Min / target SDK** | **21** / 34 — installs on Android 5.0+ |
 | **Signature** | **v1 (JAR) + v2** APK Signature Scheme, zip-aligned |
 | **Permissions** | *none* — fully offline, no INTERNET permission |
@@ -106,6 +106,40 @@ separate, wider aura pass warms the air around food trails and cools it around h
 ground stays dim, busy corridors climb to an incandescent core. `blendScent` is pure and
 allocation-free, and is unit-tested for hue, mixture and traffic response.
 
+### The plastic brain — reward, penalty and evolution
+
+Every ant carries a five-gene policy vector (`app/src/sim/genome.ts`), multiplicative around 1.0 so a
+newborn colony behaves exactly like the hand-tuned baseline and every deviation has to be earned:
+
+| gene | what it changes |
+| --- | --- |
+| **trail commitment** | weight on high-traffic scent vs. cutting a new line |
+| **curiosity** | amplitude of frontier wander and novelty pull |
+| **obstacle foresight** | whisker reach + gain — the wall-clearance margin |
+| **vector memory** | trust in dead-reckoning home vs. sensed home guide |
+| **penalty sense** | how hard a confirmed dead route is damped |
+
+**Rewards.** Delivery pays `12 + 120·efficiency³` where efficiency is straight-line-over-travelled
+for that leg; a first harvest from any vault pays a pioneer bonus (8 + 130); riding the bright core
+of a live corridor pays a continuous trickle; antennation contact pays both ants.
+
+**Penalties.** Wall contact (foresight ↓ learning, contour flipped if wedged), looping (curiosity up,
+trail trust down — but *only if the ant was actually following scent*), a confirmed false trail
+(switch to trail-damping and scrub the corridor on the way home), and metabolic timeout.
+
+**Learning.** Each ant keeps eligibility traces of what it is engaged with (scent exposure, novelty);
+a payoff shifts the genes that were active when it arrived, weighted by the ant's *advantage* over
+the colony-average skill — so only behaviour that beats its peers is reinforced.
+
+**Evolution.** A twelve-slot Hall of Fame ranks ants on proven trip efficiency. Newborns (and ants
+retired at the nest when the colony is at capacity) are uniform crossovers of two elites with a small
+mutation, and carry `max(parent)+1` as their generation.
+
+*Measured:* in a six-minute run the colony reaches generation 4 with ~300 workers retired and
+replaced; foresight rises in walled worlds, vector memory and penalty sense climb, curiosity rises
+then plateaus, and no gene runs to its rail. A seeded A/B against a fixed-brain colony currently
+shows only a ~1 % efficiency edge — see *Known limits*.
+
 ### Ant intelligence — shortest-path locking
 
 *Bullet points below are the behaviours verified in `scripts/test-sim.mjs`.*
@@ -147,6 +181,20 @@ registers. Evaporation reads that counter through a 16-bucket table: idle ground
 2–3× the rate of a walked corridor, so an abandoned trail fades out in tens of seconds while the
 route the colony is actually using stays bright. There is no global "clear" pass — the trails are
 erased by the colony's own footsteps and by neglect.
+
+### Known limits
+
+The evolutionary loop is in place and the learning dynamics are measurable, but a seeded A/B
+(three seeds, four minutes each, identical layout) does **not** yet show a decisive throughput
+advantage for the learning colony: efficiency came out ~1 % higher on two seeds, deliveries were
+mixed. The reason is structural — at the population cap only ~15 % of workers are replaced in a few
+minutes, and these five genes explain a small share of what makes a trip efficient compared with
+food geometry, density and wall layout. The next levers, in order of expected effect, are: let genes
+set sensor geometry (antenna angle/distance) and the homing blend range, raise the turnover rate, and
+run selection over longer horizons.
+
+A related bug this work uncovered: the odometer incremented `speed × dt` while movement integrated
+per frame, so every leg looked 60× shorter than it was — trip efficiency always read exactly 1.000.
 
 ---
 

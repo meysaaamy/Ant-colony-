@@ -18,6 +18,19 @@ import {
   hashCoord,
   computeWhiskerAvoidance,
 } from './math';
+import {
+  GENE_COUNT,
+  GENE_TRAIL,
+  GENE_CURIOSITY,
+  GENE_FORESIGHT,
+  GENE_VECTOR,
+  GENE_PENALTY,
+  seedGenome,
+  breedGenome,
+  nudgeGene,
+  blendGenome,
+  genomeDistance,
+} from './genome';
 
 /** Total standing nutrients below which the colony starts to feel the pinch. */
 const FEAST_LEVEL = 140;
@@ -28,6 +41,17 @@ const FEAST_LEVEL = 140;
  * the plate, which made the colony look clairvoyant.
  */
 const FOOD_SIGHT_RANGE = 96;
+
+/** How many elite brains the colony remembers, and how wildly it re-rolls them. */
+const HALL_OF_FAME = 12;
+const ELITE_MUTATION = 0.07;
+const BIRTH_ELITE_CHANCE = 0.85;
+
+/** Penalty kinds, used to pick which gene the lesson lands on. */
+const PENALTY_WALL = 0;
+const PENALTY_LOOP = 1;
+const PENALTY_FALSE_TRAIL = 2;
+const PENALTY_TIMEOUT = 3;
 
 export class SimulationEngine {
   public config: SimulationConfig;
@@ -101,6 +125,48 @@ export class SimulationEngine {
   public progressRef: Float32Array;
   private lastErrandState: Int8Array;
   public breakout: Float32Array;
+
+  // ── Plastic brain, reward accounting and colony evolution ──────────────
+  /** Every ant's policy vector, flat: `i * GENE_COUNT + gene`. */
+  public genome: Float32Array;
+  /** Lifetime score, boosted by payoffs and drained by mistakes. */
+  public fitness: Float32Array;
+  public generation: Int32Array;
+  /** Seconds left in trail-damping mode after a dead route was confirmed. */
+  public damping: Float32Array;
+  /** Decaying 0–1 pulse used by the renderer to flash a rewarded ant. */
+  public rewardFlash: Float32Array;
+  /** Eligibility traces: what the ant was *doing* when the lesson arrived. */
+  private trailTrace: Float32Array;
+  private novelTrace: Float32Array;
+  private metabolic: Float32Array;
+  private scrapeCooldown: Float32Array;
+  private legStraight: Float32Array;
+  /** Hall of Fame: the best 12 genomes this colony has produced so far. */
+  public eliteGenomes: Float32Array;
+  public eliteFitness: Float32Array;
+  public eliteGeneration: Int32Array;
+  public eliteCount = 0;
+  public colonyGeneration = 1;
+  public bestFitness = 0;
+  public lifetimeDeliveries = 0;
+  /** Each ant's rolling trip efficiency — the real measure of forager skill. */
+  public skill: Float32Array;
+  /** Colony-average skill, refreshed a few times a second (advantage baseline). */
+  public skillMean = 0.45;
+  /** Running mean of return-leg straightness (1 = bead-line home). */
+  public efficiencySum = 0;
+  public efficiencyCount = 0;
+  /** Master switch for policy learning (off = fixed, generation-1 brains). */
+  public learningEnabled = true;
+  public learnedEvents = 0;
+  public penaltyEvents = 0;
+  /** Vaults this colony has ever harvested from (pioneer bonus bookkeeping). */
+  private discovered = new Set<number>();
+  /** Ants that entered trail-damping this session. */
+  public dampingEvents = 0;
+  /** Workers retired at the nest and replaced by bred successors. */
+  public retirements = 0;
   public wallCooldown: Float32Array;
   /** Distance travelled on the current leg (nest→food or food→nest). */
   public pathLen: Float32Array;
@@ -207,6 +273,20 @@ export class SimulationEngine {
     this.progressRef = new Float32Array(this.MAX_AGENTS);
     this.lastErrandState = new Int8Array(this.MAX_AGENTS);
     this.breakout = new Float32Array(this.MAX_AGENTS);
+    this.genome = new Float32Array(this.MAX_AGENTS * GENE_COUNT);
+    this.fitness = new Float32Array(this.MAX_AGENTS);
+    this.generation = new Int32Array(this.MAX_AGENTS);
+    this.damping = new Float32Array(this.MAX_AGENTS);
+    this.rewardFlash = new Float32Array(this.MAX_AGENTS);
+    this.trailTrace = new Float32Array(this.MAX_AGENTS);
+    this.novelTrace = new Float32Array(this.MAX_AGENTS);
+    this.metabolic = new Float32Array(this.MAX_AGENTS);
+    this.scrapeCooldown = new Float32Array(this.MAX_AGENTS);
+    this.legStraight = new Float32Array(this.MAX_AGENTS);
+    this.skill = new Float32Array(this.MAX_AGENTS);
+    this.eliteGenomes = new Float32Array(HALL_OF_FAME * GENE_COUNT);
+    this.eliteFitness = new Float32Array(HALL_OF_FAME);
+    this.eliteGeneration = new Int32Array(HALL_OF_FAME);
     this.wallCooldown = new Float32Array(this.MAX_AGENTS);
     this.pathLen = new Float32Array(this.MAX_AGENTS);
     this.prevX = new Float32Array(this.MAX_AGENTS);
@@ -279,6 +359,17 @@ export class SimulationEngine {
     this.progressRef[idx] = 0;
     this.lastErrandState[idx] = this.state[idx];
     this.breakout[idx] = 0;
+    this.fitness[idx] = 0;
+    this.damping[idx] = 0;
+    this.rewardFlash[idx] = 0;
+    this.trailTrace[idx] = 0;
+    this.novelTrace[idx] = 0;
+    this.metabolic[idx] = 0;
+    this.scrapeCooldown[idx] = 0;
+    this.legStraight[idx] = 0;
+    this.skill[idx] = 0.4;
+    // Born from the Hall of Fame, not from nothing.
+    this.inheritGenome(idx);
     this.stuckTimer[idx] = 0;
     this.lastSampleX[idx] = x;
     this.lastSampleY[idx] = y;
@@ -303,6 +394,8 @@ export class SimulationEngine {
   }
 
   public loadPreset(preset: PresetType) {
+    this.discovered.clear();
+    this.dampingEvents = 0;
     this.activePreset = preset;
     this.activeCount = 0;
     this.clearPheromones();
@@ -545,6 +638,280 @@ export class SimulationEngine {
    * Main simulation tick.
    * Fixed dt = 1/60s. Zero allocations inside this loop.
    */
+  /* ── Genome, reward and evolution ────────────────────────────────────── */
+
+  /** One gene of one ant (0.35 … 1.95, 1.0 = neutral). */
+  public gene(i: number, g: number): number {
+    return this.genome[i * GENE_COUNT + g];
+  }
+
+  /** Mean how-far-from-neutral the living colony is — "how evolved". */
+  public get colonyBrainDistance(): number {
+    let sum = 0;
+    const n = this.activeCount;
+    if (n === 0) return 0;
+    for (let i = 0; i < n; i++) sum += genomeDistance(this.genome, i * GENE_COUNT);
+    return sum / n;
+  }
+
+  public get colonyAverageFitness(): number {
+    const n = this.activeCount;
+    if (n === 0) return 0;
+    let sum = 0;
+    for (let i = 0; i < n; i++) sum += this.fitness[i];
+    return sum / n;
+  }
+
+  public get eliteBestFitness(): number {
+    return this.eliteCount > 0 ? this.eliteFitness[0] : 0;
+  }
+
+  /**
+   * Positive reinforcement. Banks the score, then pushes the policy along the
+   * eligibility trace that was live when the payoff arrived: a reward earned
+   * while riding a scent corridor sharpens trail commitment, one earned while
+   * breaking new ground sharpens curiosity.
+   */
+  private rewardAnt(i: number, amount: number): void {
+    const base = i * GENE_COUNT;
+    if (!this.learningEnabled) {
+      this.fitness[i] += amount;
+      if (this.fitness[i] > this.bestFitness) this.bestFitness = this.fitness[i];
+      this.metabolic[i] = 0;
+      return;
+    }
+    this.fitness[i] += amount;
+    if (this.fitness[i] > this.bestFitness) this.bestFitness = this.fitness[i];
+    this.rewardFlash[i] = Math.min(1, this.rewardFlash[i] + amount * 0.02);
+    this.metabolic[i] = 0;
+    this.learnedEvents++;
+
+    // Advantage weighting: only behaviour that beats the colony average is
+    // reinforced. Learning everything equally just drags every brain to the same
+    // mean, which leaves natural selection nothing to choose between.
+    const advantage = Math.max(0, this.skill[i] - this.skillMean);
+    const learnRate = 0.013 * Math.min(3, amount / 45) * (0.35 + 3.2 * advantage);
+    const trail = this.trailTrace[i];
+    const novel = this.novelTrace[i];
+
+    if (trail > 0.12 && trail >= novel) {
+      nudgeGene(this.genome, base, GENE_TRAIL, learnRate * trail);
+      nudgeGene(this.genome, base, GENE_CURIOSITY, -learnRate * 0.3 * trail);
+    } else if (novel > 0.12) {
+      nudgeGene(this.genome, base, GENE_CURIOSITY, learnRate * novel);
+      nudgeGene(this.genome, base, GENE_TRAIL, -learnRate * 0.25 * novel);
+    }
+    // Getting home is also evidence that the internal compass is trustworthy.
+    nudgeGene(this.genome, base, GENE_VECTOR, learnRate * 0.45);
+
+    // Homeostatic prior: plasticity costs metabolism, so a gene only stays away
+    // from the neutral 1.0 while it keeps paying. Without this the policy drifts
+    // to the rails over a long session and the colony forgets how to use trails.
+    for (let g = 0; g < GENE_COUNT; g++) {
+      nudgeGene(this.genome, base, g, (1 - this.genome[base + g]) * 0.005);
+    }
+  }
+
+  /**
+   * Negative reinforcement. Each mistake lands on the gene that could have
+   * prevented it, scaled by the ant's own penalty sensitivity.
+   */
+  private penalizeAnt(i: number, amount: number, kind: number): void {
+    const base = i * GENE_COUNT;
+    if (!this.learningEnabled) {
+      this.fitness[i] = Math.max(0, this.fitness[i] - amount);
+      return;
+    }
+    this.fitness[i] = Math.max(0, this.fitness[i] - amount);
+    this.penaltyEvents++;
+    this.learnedEvents++;
+
+    const rate = 0.045 * Math.min(2, amount) * this.genome[base + GENE_PENALTY];
+    // Same metabolic prior as rewards: a lesson only moves a gene away from
+    // neutral as fast as it is repeated, and drift decays back.
+    for (let g = 0; g < GENE_COUNT; g++) {
+      nudgeGene(this.genome, base, g, (1 - this.genome[base + g]) * 0.005);
+    }
+    switch (kind) {
+      case PENALTY_WALL:
+        // Scraping a wall is purely a foresight failure: give it more margin.
+        nudgeGene(this.genome, base, GENE_FORESIGHT, rate);
+        nudgeGene(this.genome, base, GENE_PENALTY, rate * 0.1);
+        break;
+      case PENALTY_LOOP: {
+        // Circling only says something about scent if the ant was *following*
+        // scent. Punishing a wanderer's curiosity would teach the wrong lesson,
+        // and over a long session that is exactly how a colony forgets how to
+        // use its own trails.
+        const engaged = this.trailTrace[i];
+        if (engaged > 0.25) {
+          nudgeGene(this.genome, base, GENE_CURIOSITY, rate * 0.5 * engaged);
+          nudgeGene(this.genome, base, GENE_TRAIL, -rate * 0.2 * engaged);
+          nudgeGene(this.genome, base, GENE_PENALTY, rate * 0.12 * engaged);
+        }
+        break;
+      }
+      case PENALTY_FALSE_TRAIL:
+        nudgeGene(this.genome, base, GENE_PENALTY, rate * 0.35);
+        nudgeGene(this.genome, base, GENE_TRAIL, -rate * 0.55);
+        break;
+      default:
+        // Long wander with nothing to show for it: lean on the compass home.
+        nudgeGene(this.genome, base, GENE_VECTOR, rate * 0.5);
+        break;
+    }
+  }
+
+  private copyGenomeToElite(slot: number, base: number): void {
+    const o = slot * GENE_COUNT;
+    for (let g = 0; g < GENE_COUNT; g++) this.eliteGenomes[o + g] = this.genome[base + g];
+  }
+
+  private sortElites(): void {
+    for (let a = 1; a < this.eliteCount; a++) {
+      const fit = this.eliteFitness[a];
+      const gen = this.eliteGeneration[a];
+      const copy = new Float32Array(GENE_COUNT);
+      copy.set(this.eliteGenomes.subarray(a * GENE_COUNT, a * GENE_COUNT + GENE_COUNT));
+      let b = a - 1;
+      while (b >= 0 && this.eliteFitness[b] < fit) {
+        this.eliteFitness[b + 1] = this.eliteFitness[b];
+        this.eliteGeneration[b + 1] = this.eliteGeneration[b];
+        this.eliteGenomes.copyWithin((b + 1) * GENE_COUNT, b * GENE_COUNT, b * GENE_COUNT + GENE_COUNT);
+        b--;
+      }
+      this.eliteFitness[b + 1] = fit;
+      this.eliteGeneration[b + 1] = gen;
+      this.eliteGenomes.set(copy, (b + 1) * GENE_COUNT);
+    }
+  }
+
+  /** A delivery earns a place in the Hall of Fame if it beats the weakest elite. */
+  /** What the Hall of Fame actually ranks on: proven trip efficiency first. */
+  private eliteScore(i: number): number {
+    return this.skill[i] * 140 + Math.min(this.fitness[i], 400) * 0.15;
+  }
+
+  private enrolElite(i: number): void {
+    const base = i * GENE_COUNT;
+    const score = this.eliteScore(i);
+    if (this.eliteCount < HALL_OF_FAME) {
+      const slot = this.eliteCount++;
+      this.copyGenomeToElite(slot, base);
+      this.eliteFitness[slot] = score;
+      this.eliteGeneration[slot] = this.generation[i];
+      this.sortElites();
+      return;
+    }
+    if (score <= this.eliteFitness[HALL_OF_FAME - 1]) return;
+    const slot = HALL_OF_FAME - 1;
+    this.copyGenomeToElite(slot, base);
+    this.eliteFitness[slot] = score;
+    this.eliteGeneration[slot] = this.generation[i];
+    this.sortElites();
+  }
+
+  /**
+   * Birth. Cross-breed two Hall-of-Fame brains and mutate slightly, or — for a
+   * colony with no elites yet — start from a fresh generation-1 brain.
+   */
+  private inheritGenome(i: number): void {
+    const base = i * GENE_COUNT;
+    if (this.eliteCount >= 2 && Math.random() < BIRTH_ELITE_CHANCE) {
+      const a = Math.floor(Math.random() * this.eliteCount);
+      let b = Math.floor(Math.random() * this.eliteCount);
+      if (b === a) b = (a + 1) % this.eliteCount;
+      breedGenome(
+        this.genome,
+        base,
+        this.eliteGenomes,
+        a * GENE_COUNT,
+        this.eliteGenomes,
+        b * GENE_COUNT,
+        ELITE_MUTATION
+      );
+      this.generation[i] = Math.max(this.eliteGeneration[a], this.eliteGeneration[b]) + 1;
+    } else {
+      seedGenome(this.genome, base);
+      this.generation[i] = 1;
+    }
+    if (this.generation[i] > this.colonyGeneration) this.colonyGeneration = this.generation[i];
+  }
+
+  /**
+   * Sample a few workers and return the least successful one, if it is clearly
+   * below the colony average. Sampling (rather than a full scan) keeps this
+   * O(1) and stops the colony from executing its best ants by accident.
+   */
+  private weakestAnt(): number {
+    const n = this.activeCount;
+    if (n < 8) return -1;
+    let worst = -1;
+    let worstScore = Infinity;
+    let total = 0;
+    const samples = 8;
+    for (let k = 0; k < samples; k++) {
+      const i = Math.floor(Math.random() * n);
+      const score = this.skill[i] * 140 + Math.min(this.fitness[i], 400) * 0.15;
+      total += score;
+      if (score < worstScore) {
+        worstScore = score;
+        worst = i;
+      }
+    }
+    const mean = total / samples;
+    return worstScore < mean * 0.6 ? worst : -1;
+  }
+
+  /** Retire a worker and hatch a bred replacement in its slot. */
+  private retireAnt(i: number, x: number, y: number): void {
+    this.x[i] = x + (Math.random() - 0.5) * 16;
+    this.y[i] = y + (Math.random() - 0.5) * 16;
+    this.angle[i] = Math.random() * Math.PI * 2;
+    this.state[i] = AntState.FORAGING;
+    this.pathLen[i] = 0;
+    this.patience[i] = 0;
+    this.progressRef[i] = 0;
+    this.breakout[i] = 0;
+    this.fitness[i] = 0;
+    this.damping[i] = 0;
+    this.rewardFlash[i] = 0;
+    this.trailTrace[i] = 0;
+    this.novelTrace[i] = 0;
+    this.metabolic[i] = 0;
+    this.scrapeCooldown[i] = 0;
+    this.legStraight[i] = 0;
+    this.skill[i] = 0.4;
+    this.wallMode[i] = 0;
+    this.stuckTimer[i] = 0;
+    this.inheritGenome(i);
+  }
+
+  /** Erode a patch of food trail: the cancellation signal left by a dead route. */
+  private erodeTrail(x: number, y: number, radius: number, strength: number): void {
+    const cs = this.config.cellSize;
+    const minGx = Math.max(0, Math.floor((x - radius) / cs));
+    const maxGx = Math.min(this.gridWidth - 1, Math.floor((x + radius) / cs));
+    const minGy = Math.max(0, Math.floor((y - radius) / cs));
+    const maxGy = Math.min(this.gridHeight - 1, Math.floor((y + radius) / cs));
+    const rSq = radius * radius;
+    for (let gy = minGy; gy <= maxGy; gy++) {
+      const cy = gy * cs + cs * 0.5;
+      const dy = cy - y;
+      const yOffset = gy * this.gridWidth;
+      for (let gx = minGx; gx <= maxGx; gx++) {
+        const cx = gx * cs + cs * 0.5;
+        const dx = cx - x;
+        if (dx * dx + dy * dy > rSq) continue;
+        const idx = yOffset + gx;
+        this.foodTrail[idx] *= 1 - strength;
+        this.traffic[idx] *= 1 - strength * 1.6;
+        if (this.foodTrail[idx] < 0.4) this.foodTrail[idx] = 0;
+        if (this.traffic[idx] < 0) this.traffic[idx] = 0;
+      }
+    }
+  }
+
   public step(dt: number) {
     this.simTime += dt;
     this.stepCounter++;
@@ -578,6 +945,14 @@ export class SimulationEngine {
     const famineTarget = 1 - Math.min(1, foodLeft / FEAST_LEVEL);
     this.famine += (famineTarget - this.famine) * Math.min(1, dt * 1.8);
     if (this.famine < 0.002) this.famine = 0;
+
+    // Rolling colony-average skill: the baseline every ant is judged against.
+    if (this.stepCounter % 30 === 0 && this.activeCount > 0) {
+      let sum = 0;
+      for (let i = 0; i < this.activeCount; i++) sum += this.skill[i];
+      const mean = sum / this.activeCount;
+      this.skillMean += (mean - this.skillMean) * 0.25;
+    }
 
     // 5. Update Agents
     this.updateAgents(dt);
@@ -753,7 +1128,7 @@ export class SimulationEngine {
     this.lastVisitGrid[cIdx] = this.simTime;
     // Walking a corridor is what keeps it alive — in proportion to how
     // directly this leg served the errand.
-    this.traffic[cIdx] = Math.min(8.0, this.traffic[cIdx] + 1.4 * vigour);
+    this.traffic[cIdx] = Math.min(8.0, this.traffic[cIdx] + 2.0 * vigour);
 
     if (!wide) return;
 
@@ -766,7 +1141,7 @@ export class SimulationEngine {
       const nIdx = ngy * this.gridWidth + ngx;
       if (this.wallGrid[nIdx] === 1) continue;
       field[nIdx] = Math.min(100.0, field[nIdx] + spill * 0.28);
-      this.traffic[nIdx] = Math.min(8.0, this.traffic[nIdx] + 0.55 * vigour);
+      this.traffic[nIdx] = Math.min(8.0, this.traffic[nIdx] + 0.8 * vigour);
     }
   }
 
@@ -878,6 +1253,15 @@ export class SimulationEngine {
       let ang = this.angle[i];
       const currentState = this.state[i];
 
+      // This ant's plastic policy. 1.0 = textbook ant; everything else has been
+      // learned or inherited.
+      const gBase = i * GENE_COUNT;
+      const gTrail = this.genome[gBase + GENE_TRAIL];
+      const gCuriosity = this.genome[gBase + GENE_CURIOSITY];
+      const gForesight = this.genome[gBase + GENE_FORESIGHT];
+      const gVector = this.genome[gBase + GENE_VECTOR];
+      this.metabolic[i] += dt;
+
       // Sample alarm at current ant position
       const localAlarm = this.sampleField(this.alarm, px, py);
       if (localAlarm > 15.0) {
@@ -946,6 +1330,7 @@ export class SimulationEngine {
         }
       } else if (this.patience[i] > 5.5) {
         // Round and round with nothing gained: snap the heading and walk.
+        this.penalizeAnt(i, 2.2, PENALTY_LOOP);
         this.breakout[i] = 1.3;
         this.patience[i] = 0;
         this.progressRef[i] = distNest;
@@ -958,7 +1343,9 @@ export class SimulationEngine {
 
       // A breaking ant stops believing the scent for a moment, otherwise it is
       // pulled straight back onto the same loop.
-      const antTrust = this.breakout[i] > 0 ? trailTrust * 0.12 : trailTrust;
+      const antTrust =
+        (this.breakout[i] > 0 ? trailTrust * 0.12 : trailTrust) *
+        (0.25 + 0.75 * gTrail);
 
       const rawL = losL ? this.sampleField(activeField, sensors.lx, sensors.ly) : 0;
       const rawC = losC ? this.sampleField(activeField, sensors.cx, sensors.cy) : 0;
@@ -970,6 +1357,33 @@ export class SimulationEngine {
       const sRight = weberFechner(rawR) * antTrust;
       const sumStimulus = sLeft + sCenter + sRight;
 
+      // ── Eligibility traces ──────────────────────────────────────────
+      // What this ant is engaged with *right now*. If a payoff lands while a
+      // trace is hot, the lesson is credited to that behaviour.
+      const traceGx = Math.max(0, Math.min(this.gridWidth - 1, Math.floor(px / cs)));
+      const traceGy = Math.max(0, Math.min(this.gridHeight - 1, Math.floor(py / cs)));
+      const cellTraffic = this.traffic[traceGy * this.gridWidth + traceGx];
+      const traceK = Math.min(1, dt * 2.5);
+      this.trailTrace[i] += (Math.min(1, rawC / 12) - this.trailTrace[i]) * traceK;
+      this.novelTrace[i] +=
+        ((cellTraffic < 0.6 ? 1 : Math.max(0, 1 - cellTraffic / 3.5)) - this.novelTrace[i]) * traceK;
+
+      // High-throughput highway bonus: riding the bright core of a live corridor.
+     
+        
+      if (currentState === AntState.RETURNING && cellTraffic > 4) {
+        this.fitness[i] += dt * 2;
+        if (this.fitness[i] > this.bestFitness) this.bestFitness = this.fitness[i];
+      }
+      // Metabolic timeout: too long with nothing to show for it.
+      if (this.metabolic[i] > 22) {
+        this.penalizeAnt(i, 0.8, PENALTY_TIMEOUT);
+        this.metabolic[i] = 0;
+      }
+      if (this.rewardFlash[i] > 0) {
+        this.rewardFlash[i] = Math.max(0, this.rewardFlash[i] - dt * 0.8);
+      }
+
       let steeringDelta = 0;
 
       // Natural Organic Exploration Wander:
@@ -978,7 +1392,8 @@ export class SimulationEngine {
       // is what pushes discovery out toward the far clusters.
       if (sumStimulus < 0.02) {
         this.wanderVelocity[i] =
-          this.wanderVelocity[i] * 0.88 + (Math.random() - 0.5) * wanderCoeff * 0.38;
+          this.wanderVelocity[i] * 0.88 +
+          (Math.random() - 0.5) * wanderCoeff * 0.38 * (0.4 + 0.6 * gCuriosity);
 
         if (currentState === AntState.FORAGING && this.stepCounter % noveltyEvery === i % noveltyEvery) {
           let bestNovelty = -1;
@@ -1002,7 +1417,7 @@ export class SimulationEngine {
           let d = bestAng - ang;
           while (d > Math.PI) d -= Math.PI * 2;
           while (d < -Math.PI) d += Math.PI * 2;
-          steeringDelta += d * (0.12 + 0.2 * famine);
+          steeringDelta += d * (0.12 + 0.2 * famine) * (0.5 + 0.5 * gCuriosity);
         }
       } else {
         this.wanderVelocity[i] *= 0.6;
@@ -1080,7 +1495,7 @@ export class SimulationEngine {
           let d = a - ang;
           while (d > Math.PI) d -= Math.PI * 2;
           while (d < -Math.PI) d += Math.PI * 2;
-          steeringDelta += d * 0.22;
+          steeringDelta += d * 0.22 * (0.35 + 0.65 * gVector);
         }
       } else {
         let best: { d: number; a: number } | null = null;
@@ -1106,13 +1521,15 @@ export class SimulationEngine {
 
       // Layered whiskers: near/mid/far so ants start turning early and never
       // press into a corner ("پشت دیوارها گیر نکنند").
+      // Whisker reach is the ant's learned clearance margin: a nervous, evolved
+      // ant starts its tangent turn earlier than a clumsy newborn.
       for (const [reach, spread, gain] of [
-        [antRadius + 9, 0.46, 0.55],
-        [antRadius + 17, 0.62, 0.35],
-        [antRadius + 26, 0.78, 0.2],
+        [antRadius + 9 * gForesight, 0.46, 0.55],
+        [antRadius + 17 * gForesight, 0.62, 0.35],
+        [antRadius + 26 * gForesight, 0.78, 0.2],
       ] as [number, number, number][]) {
         const torque = computeWhiskerAvoidance(px, py, ang, reach, spread, isWallFn, cs);
-        if (torque !== 0) steeringDelta += torque * gain;
+        if (torque !== 0) steeringDelta += torque * gain * (0.7 + 0.3 * gForesight);
       }
 
       // Path Integration & Dead Reckoning for RETURNING ants
@@ -1129,19 +1546,40 @@ export class SimulationEngine {
 
         // Blend Path Integration with sensed Home Guide pheromones
         const chemicalConfidence = Math.min(1.0, sumStimulus * 0.45);
-        const piWeight = Math.max(0.3, 1.0 - chemicalConfidence);
+        const piWeight = Math.max(0.3, 1.0 - chemicalConfidence) * (0.45 + 0.55 * gVector);
         const steerHome = angleDiff * 0.14 * piWeight;
 
         steeringDelta += steerHome;
 
         // Food Delivery Check at Nest
         if (nestDist < nestR) {
+          // ── Shortest-path efficiency jackpot ────────────────────────
+          // Score the leg *before* the odometer is reset: reward scales with how
+          // straight the trip home was, so a bead-line return is worth far more
+          // than a wandering one. (Getting this order wrong silently hands every
+          // ant a perfect score, and the colony learns nothing.)
+          const straight = this.legStraight[i] || 1;
+          const travelled = Math.max(straight, this.pathLen[i]);
+          const efficiency = straight / travelled;
+          // Steeply weighted: a bead-line trip is worth many wandering ones, so
+          // the Hall of Fame fills with ants that actually know the way home.
+          const jackpot = 12 + 120 * efficiency * efficiency * efficiency;
+          this.skill[i] = this.skill[i] * 0.65 + efficiency * 0.35;
+          this.rewardAnt(i, jackpot);
+
           // Deliver nutrient
           this.state[i] = AntState.FORAGING;
           this.pathLen[i] = 0;
           this.homeDx[i] = 0;
           this.homeDy[i] = 0;
           ang += Math.PI; // Turn back towards foraging grounds
+
+          this.lifetimeDeliveries++;
+          this.efficiencySum += efficiency;
+          this.efficiencyCount++;
+          this.enrolElite(i);
+          this.damping[i] = 0;
+          this.metabolic[i] = 0;
 
           this.nest.storedFood++;
           this.nest.spawnAccumulator++;
@@ -1156,8 +1594,16 @@ export class SimulationEngine {
               const spawnAngle = Math.random() * Math.PI * 2;
               this.spawnAnt(nestX + Math.cos(spawnAngle) * 12, nestY + Math.sin(spawnAngle) * 12, spawnAngle);
               if (this.onAntSpawned) this.onAntSpawned();
-            } else if (this.onColonyCapacity) {
-              this.onColonyCapacity();
+            } else {
+              // At capacity the colony still turns over: a worker that has
+              // proven itself weak is retired at the nest and a freshly bred
+              // one takes its place, which is what makes generations advance.
+              const victim = this.weakestAnt();
+              if (victim >= 0) {
+                this.retireAnt(victim, nestX, nestY);
+                this.retirements++;
+              }
+              if (this.onColonyCapacity) this.onColonyCapacity();
             }
           }
         }
@@ -1165,15 +1611,42 @@ export class SimulationEngine {
         // Check contact with food clusters
         for (let f = 0; f < this.foodClusters.length; f++) {
           const cluster = this.foodClusters[f];
-          if (cluster.currentAmount <= 0) continue;
+          if (cluster.currentAmount <= 0) {
+            // A vault that is empty but still smells: somebody laid a trail to
+            // nothing. Confirm the false route, punish it, and switch to
+            // trail-damping — the walk home scrubs the obsolete scent away.
+            if (this.damping[i] <= 0 && this.trailTrace[i] > 0.15) {
+              const deadDist = Math.hypot(cluster.x - px, cluster.y - py);
+              if (deadDist < cluster.radius + antRadius + 6) {
+                this.penalizeAnt(i, 4, PENALTY_FALSE_TRAIL);
+                this.damping[i] = 2.6;
+                this.dampingEvents++;
+                ang += Math.PI;
+              }
+            }
+            continue;
+          }
 
           const fdx = cluster.x - px;
           const fdy = cluster.y - py;
           const fDist = Math.hypot(fdx, fdy);
 
           if (fDist < cluster.radius + antRadius) {
+            // ── First-discovery pioneer bonus ──────────────────────────
+            // Wide, faint, or new ground is good ground: pay for finding it.
+            this.rewardAnt(i, 8);
+            if (!this.discovered.has(cluster.id)) {
+              this.discovered.add(cluster.id);
+              this.rewardAnt(i, 130);
+            }
+            // Remember the straight-line length of the leg we are about to fly,
+            // so the delivery can be scored on its efficiency.
+            this.legStraight[i] = Math.hypot(px - nestX, py - nestY);
+
             // Harvest food crystal unit!
             cluster.currentAmount--;
+            this.damping[i] = 0;
+            this.metabolic[i] = 0;
             this.state[i] = AntState.RETURNING;
             this.pathLen[i] = 0; // fresh leg: potency starts at maximum
             ang += Math.PI; // Turn back towards nest
@@ -1242,6 +1715,15 @@ export class SimulationEngine {
       if (col.collided) {
         px = col.x;
         py = col.y;
+        // Scraping a wall is a foresight failure: pay for it, learn from it,
+        // and if we are actually wedged, flip the contour direction.
+        if (this.scrapeCooldown[i] <= 0) {
+          this.penalizeAnt(i, 1.4, PENALTY_WALL);
+          this.scrapeCooldown[i] = 0.7;
+          if (this.stuckTimer[i] > 0.1 && this.wallMode[i] !== 0) {
+            this.wallMode[i] = this.wallMode[i] === 1 ? -1 : 1;
+          }
+        }
         if (this.wallMode[i] === 0 && this.wallCooldown[i] <= 0) {
           // Choose the side that continues closest to the current errand.
           const tanL = Math.atan2(col.normalX, -col.normalY);
@@ -1281,6 +1763,7 @@ export class SimulationEngine {
       }
 
       if (this.wallCooldown[i] > 0) this.wallCooldown[i] -= dt;
+      if (this.scrapeCooldown[i] > 0) this.scrapeCooldown[i] -= dt;
 
       // Active Stuck Detector & Recovery:
       // Guarantees ants never remain trapped in corners or dead-ends
@@ -1357,11 +1840,24 @@ export class SimulationEngine {
             Math.hypot(px - this.prevX[i], py - this.prevY[i]) / (cs * 0.9)
           )
         );
-        for (let sIdx = 1; sIdx <= steps; sIdx++) {
-          const t = sIdx / steps;
-          const sx = this.prevX[i] + (px - this.prevX[i]) * t;
-          const sy = this.prevY[i] + (py - this.prevY[i]) * t;
-          this.depositScent(depField, sx, sy, baseStr, isReturning, vigour);
+        if (this.damping[i] > 0) {
+          // ── Trail-damping mode ──────────────────────────────────────
+          // This ant knows the corridor is false. Instead of feeding it, it
+          // scrubs it, so the rest of the colony stops walking into a dead end.
+          const strength = 0.09 * this.genome[gBase + GENE_PENALTY];
+          for (let sIdx = 1; sIdx <= steps; sIdx++) {
+            const t = sIdx / steps;
+            const sx = this.prevX[i] + (px - this.prevX[i]) * t;
+            const sy = this.prevY[i] + (py - this.prevY[i]) * t;
+            this.erodeTrail(sx, sy, 13, strength);
+          }
+        } else {
+          for (let sIdx = 1; sIdx <= steps; sIdx++) {
+            const t = sIdx / steps;
+            const sx = this.prevX[i] + (px - this.prevX[i]) * t;
+            const sy = this.prevY[i] + (py - this.prevY[i]) * t;
+            this.depositScent(depField, sx, sy, baseStr, isReturning, vigour);
+          }
         }
 
         // Bright micro-sparkles riding the returning highways
@@ -1382,7 +1878,10 @@ export class SimulationEngine {
       // Remember where we were, for next tick's trail interpolation.
       this.prevX[i] = px;
       this.prevY[i] = py;
-      this.pathLen[i] += currentSpeed * dt;
+      // Movement is integrated per frame (px += cos·speed), so the odometer has
+      // to be per frame too. Using dt here made every leg look 60× shorter than
+      // it was: trip efficiency always read 1.000 and trail potency never decayed.
+      this.pathLen[i] += currentSpeed;
 
       // Social Information Transfer (Antennation) via Spatial Hash Grid
       if (currentState === AntState.FORAGING && this.stepCounter % 3 === 0) {
@@ -1405,6 +1904,25 @@ export class SimulationEngine {
                   this.antennationTimer[i] = 0.8; // Excitement boost
                   // Steer towards returning ant's origin direction
                   ang = (ang + (this.angle[neighborIdx] + Math.PI)) * 0.5;
+
+                  // ── Elite social learning ─────────────────────────────
+                  // A scout that brushes against a clearly more successful
+                  // forager copies part of its brain, not just its direction.
+                  if (
+                    this.fitness[neighborIdx] > this.fitness[i] + 20 &&
+                    Math.random() < 0.35
+                  ) {
+                    blendGenome(
+                      this.genome,
+                      gBase,
+                      this.genome,
+                      neighborIdx * GENE_COUNT,
+                      0.12
+                    );
+                    // Cooperative fitness boost: teaching pays too.
+                    this.fitness[i] += 2;
+                    this.fitness[neighborIdx] += 1.5;
+                  }
                   break;
                 }
               }
