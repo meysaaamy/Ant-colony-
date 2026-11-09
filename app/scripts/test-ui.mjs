@@ -49,6 +49,14 @@ window.HTMLCanvasElement.prototype.setPointerCapture = function () {};
 window.HTMLCanvasElement.prototype.releasePointerCapture = function () {};
 window.addEventListener('error', (e) => errors.push(`window.error: ${e.message}`));
 
+/* Hard watchdog: jsdom's requestAnimationFrame loop keeps the event loop alive,
+   so a failure before the final assertions would hang the runner. */
+const watchdog = setTimeout(() => {
+  console.error('✗ test watchdog fired after 60s — exiting');
+  process.exit(2);
+}, 60_000);
+watchdog.unref?.();
+
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 const q = (s) => document.querySelector(s);
 const qa = (s) => [...document.querySelectorAll(s)];
@@ -221,6 +229,8 @@ check('dragging the handle snaps toward full', () => {
 });
 
 console.log(results.join('\n'));
+dom.window.close();
+clearTimeout(watchdog);
 if (errors.length) {
   console.error('\nFAILURES:\n' + errors.join('\n'));
   process.exit(1);

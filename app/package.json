@@ -2,12 +2,14 @@
   "name": "myrmecodia-ant-colony",
   "private": true,
   "version": "1.0.0",
-  "description": "Bioluminescent ant-colony scent-painting sandbox \u2014 mobile HUD, engineered for Android WebView.",
+  "description": "Bioluminescent ant-colony scent-painting sandbox — mobile HUD, engineered for Android WebView.",
   "type": "module",
   "scripts": {
     "build": "node scripts/build.mjs",
     "typecheck": "tsc --noEmit",
-    "test": "node scripts/test-ui.mjs"
+    "test": "node scripts/test-ui.mjs",
+    "preview": "node scripts/preview.mjs",
+    "serve": "node scripts/build.mjs && node scripts/preview.mjs"
   },
   "dependencies": {
     "react": "^19.0.1",

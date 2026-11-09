@@ -129,7 +129,7 @@ app/                    React + TypeScript sandbox (Vite-free, esbuild)
   src/sim/              engine, renderer, math, types
   src/audio/            generative soundscape
   scripts/build.mjs     esbuild → www/ (classic IIFE + CSS, no ES modules: file:// safe)
-  scripts/preview.mjs   zero-dep preview server (bind 0.0.0.0:5173)
+  scripts/preview.mjs   zero-dep preview server (0.0.0.0:5173, auto-builds www/ if missing)
   scripts/test-ui.mjs   28-check headless interaction suite (jsdom + stubbed Canvas2D)
 
 android/                apktool project (no Gradle)
@@ -166,13 +166,13 @@ against a production-signed APK (`io.appium.settings`) and the output verifies w
 Preview the exact bundle that ships in the APK:
 
 ```bash
-cd app && npm install && npm run build && npm run preview   # http://localhost:5173
+cd app && npm install && npm run serve     # build + preview on 0.0.0.0:5173
 ```
 
 Test the shipped bundle headlessly:
 
 ```bash
-cd app && npm test        # 28/28 checks, zero runtime errors
+cd app && npm test        # 28/28 checks, ~2 s, self-terminating (watchdog-guarded)
 ```
 
 ---
