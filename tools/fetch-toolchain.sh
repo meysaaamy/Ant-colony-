@@ -43,7 +43,15 @@ if [ ! -f "$DEST/apktool.jar" ]; then
   echo "  apktool → $DEST/apktool.jar"
 fi
 
-# Python venv with `cryptography` for the v2 signer
+# aapt: apktool bundles it, but the JVM cannot always fork, so keep a copy we
+# can execute directly (used by tools/package_apk.py).
+if [ ! -x "$DEST/aapt_64" ]; then
+  echo "→ extracting aapt from the apktool jar…"
+  unzip -o -q -j "$DEST/apktool.jar" "prebuilt/linux/aapt_64" -d "$DEST"
+  chmod +x "$DEST/aapt_64"
+fi
+
+# Python venv with `cryptography` for the signer
 if [ ! -x "$DEST/venv/bin/python" ]; then
   echo "→ creating signing venv (cryptography)…"
   python3 -m venv "$DEST/venv"

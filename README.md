@@ -4,7 +4,7 @@ A bioluminescent, museum-grade **mobile sandbox for ant-colony neuroethology**, 
 signed, installable **Android APK** — no Android Studio, no Gradle, no SDK download required.
 
 ```
-dist/Ant-Colony-Scent-Painting.apk      ← the deliverable (423 KB, signed, offline)
+dist/Ant-Colony-Scent-Painting.apk      ← the deliverable (197 KB, signed, offline)
 ```
 
 The two uploaded archives (`*.zip`) were read, compared and merged into a single app: the newer
@@ -23,8 +23,8 @@ no network, no AI service calls.
 | **File** | `dist/Ant-Colony-Scent-Painting.apk` |
 | **Package** | `com.app.antcolony` |
 | **Version** | 1.0.0 (versionCode 1) |
-| **Min / target SDK** | 24 / 34 |
-| **Signature** | APK Signature Scheme **v2** (verified) |
+| **Min / target SDK** | **21** / 34 — installs on Android 5.0+ |
+| **Signature** | **v1 (JAR) + v2** APK Signature Scheme, zip-aligned |
 | **Permissions** | *none* — fully offline, no INTERNET permission |
 | **Tested surface** | 360–412 dp portrait phones, gesture-nav and 3-button nav |
 
@@ -138,12 +138,13 @@ android/                apktool project (no Gradle)
   smali/                hand-tuned WebView activity (immersive sticky, keep-screen-on,
                         obsidian background, hardware acceleration)
   res/                  app name + five-density launcher icon
-  signing/              sideload key/cert used by the v2 signer
+  signing/              sideload key/cert used by the signer
 
 tools/
-  build-apk.sh          bundle → stage → apktool → sign
+  build-apk.sh          bundle → stage → assemble → align + sign
+  package_apk.py        direct-aapt packaging (fallback when apktool cannot fork)
   fetch-toolchain.sh    provisioning (JDK via PyPI, apktool via npm, signing venv)
-  sign_apk.py           APK Signature Scheme v2 signer (pure Python + cryptography)
+  sign_apk.py           zipalign + v1 (JAR) + v2 signer (pure Python + cryptography)
 
 dist/                   signed APK
 build/                  intermediates (git-ignored)
@@ -160,9 +161,23 @@ build/                  intermediates (git-ignored)
 
 Nothing else is required: the sandbox has no Android SDK, so the toolchain is assembled from
 package mirrors that are reachable, and the APK is signed by `tools/sign_apk.py`, a small
-implementation of the APK Signature Scheme v2 format (chunked-SHA256 content digest → length-prefixed
-signed data → RSA-PKCS#1-v1.5 → signing-block insertion). The chunking semantics were validated
-against a production-signed APK (`io.appium.settings`) and the output verifies with `apksigtool`.
+implementation of both signature schemes plus `zipalign`:
+
+- **zipalign** — every STORED entry's payload starts on a 4-byte boundary (4096 for `.so`), which
+  Android 11+ requires and `resources.arsc` especially needs to stay uncompressed.
+- **v1 (JAR)** — `META-INF/MANIFEST.MF` → `CERT.SF` → `CERT.RSA` (detached PKCS#7 over `CERT.SF`).
+  Needed by pre-7.0 devices and by several OEM package installers on modern Android.
+- **v2** — chunked-SHA256 content digest → length-prefixed signed data → RSA-PKCS#1-v1.5 →
+  signing-block insertion. The chunking semantics were validated against a production-signed APK
+  (`io.appium.settings`).
+
+The v2 block verifies with `apksigtool`, and the v1 digests/signature are re-checked independently
+(manifest digests per entry, `CERT.SF` digest, then the RSA signature over `CERT.SF`).
+
+Assembling is normally apktool's job, but some sandboxes forbid the JVM from forking child
+processes, which breaks apktool's `aapt` invocation. `build-apk.sh` detects that and falls back to
+`tools/package_apk.py`, which packages resources with aapt directly and drops in the `classes.dex`
+apktool compiled in-process — same bytes, no JVM fork.
 
 Preview the exact bundle that ships in the APK:
 

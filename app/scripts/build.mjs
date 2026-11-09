@@ -16,7 +16,7 @@ await build({
   entryPoints: ['src/main.tsx'],
   bundle: true,
   format: 'iife',
-  target: ['chrome90', 'safari14'],
+  target: ['chrome61', 'safari12'],
   jsx: 'automatic',
   minify: true,
   legalComments: 'none',
