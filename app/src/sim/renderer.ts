@@ -316,12 +316,13 @@ export class SimulationRenderer {
       ctx.fillStyle = glowGrad;
       ctx.fillRect(0, 0, size, size);
 
-      // Faceted crystals
-      const crystalCount = 5 + (v % 4);
+      // Three-spired faceted cluster (spec): a tall central spire flanked by two
+      // shorter ones, each rotated slightly for an isometric read.
+      const crystalCount = 3;
       for (let i = 0; i < crystalCount; i++) {
-        const ang = (i / crystalCount) * Math.PI * 2 + (v * 0.4);
-        const len = 12 + (i % 3) * 8;
-        const width = 6 + (i % 2) * 3;
+        const ang = -Math.PI / 2 + (i - 1) * 0.62 + (v % 2 ? 0.06 : -0.06);
+        const len = i === 1 ? 26 : 17 + (v % 3) * 2;
+        const width = i === 1 ? 8.5 : 6.5;
 
         ctx.save();
         ctx.translate(half, half);
