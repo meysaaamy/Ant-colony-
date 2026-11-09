@@ -171,6 +171,10 @@ implementation of both signature schemes plus `zipalign`:
   signing-block insertion. The chunking semantics were validated against a production-signed APK
   (`io.appium.settings`).
 
+A `--v1-only` variant (`dist/Ant-Colony-Scent-Painting-v1only.apk`) is also produced
+for installers that reject the v2 block outright — Android 12+ accepts v1-only
+sideloads, it just warns.
+
 The v2 block verifies with `apksigtool`, and the v1 digests/signature are re-checked independently
 (manifest digests per entry, `CERT.SF` digest, then the RSA signature over `CERT.SF`).
 

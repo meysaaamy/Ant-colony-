@@ -21,6 +21,7 @@ Reference: https://source.android.com/docs/security/features/apksigning
 
 Usage:
     python3 sign_apk.py unsigned.apk signed.apk --key key.pem --cert cert.pem
+    python3 sign_apk.py unsigned.apk fallback.apk --key … --cert … --v1-only
 
 Keys are created on first run if they do not exist (self-signed, 30 years).
 """
@@ -403,6 +404,11 @@ def main() -> int:
     ap.add_argument("--key", default="android/signing/ant-colony.key.pem")
     ap.add_argument("--cert", default="android/signing/ant-colony.cert.pem")
     ap.add_argument("--no-v1", action="store_true", help="skip the JAR (v1) signature")
+    ap.add_argument(
+        "--v1-only",
+        action="store_true",
+        help="emit no v2 block at all (fallback for installers that reject v2)",
+    )
     args = ap.parse_args()
 
     key, cert = load_or_create_key(args.key, args.cert)
@@ -416,11 +422,11 @@ def main() -> int:
     if problems:
         raise SystemExit("alignment failed: " + "; ".join(problems))
 
-    out = add_v2_block(aligned, key, cert)
+    out = aligned if args.v1_only else add_v2_block(aligned, key, cert)
     with open(args.signed, "wb") as fh:
         fh.write(out)
 
-    sig = "v1+v2" if not args.no_v1 else "v2 only"
+    sig = "v1 only" if args.v1_only else ("v1+v2" if not args.no_v1 else "v2 only")
     print(
         f"Signed {args.unsigned} -> {args.signed} "
         f"({len(open(args.unsigned, 'rb').read())} -> {len(out)} bytes, {sig}, zip-aligned)"
